@@ -8,7 +8,8 @@ library(here)
 
 #load the data
 cont <- fread(here::here("Salinity and Specific Conductivity-2021-Jul-26.csv"))
-disc <- fread(here::here("Combined_WQ_WC_NUT_column-2021-Jul-26.csv"))
+disc <- fread(here::here("Combined_WQ_WC_NUT_column-2021-Jul-26.csv")) #Cheryl and I found many issues with this file, do not use.
+disc2 <- fread(here::here("WQ_Discrete_DuplicatesRemoved-2021-Jul-26.csv")) #We don't think this is the correct file either; going to talk with Claude.
 progmat <- fread("SEACARProgramMatrix_Salinity,Mean,StDev_2021-11-08.csv")
 
 cont[, `:=` (Sal = as.numeric(Sal), SpCond = as.numeric(SpCond),
@@ -90,7 +91,7 @@ disc_rcp <- disc[ProgramID %in% progmat$ID & ManagedAreaName %in% progmat$`Manag
 
 #Cheryl said to hold off on including the continuous stations for now, so I just proceed with the discrete data below.
 cont_rcp[, `:=` (office = ManagedArea, 
-                 station = ProgramLocationID,
+                 station = ProgramLocationID, #using ProgramLocationID here is problematic - Cheryl noticed issues with Guana River having multiple ProgramLocationIDs for the same station.
                  nyears = length(unique(Year)),
                  mean_sal = mean(Sal, na.rm = TRUE),
                  sd_sal = sd(Sal, na.rm = TRUE),
@@ -171,9 +172,9 @@ disc_rcp_sum2[, med_records_peryr := as.numeric(median(disc_rcp[ProgramID == id 
 
 #add column for mean salinity to match formatting of Station Priority Ranking .xlsx sheet
 disc_rcp_sum2[, mean_Sal_ppt := as.numeric(mean(disc_rcp[ProgramID == id & 
-                                                          ProgramLocationID == st &
-                                                          ManagedAreaName == of &
-                                                          !is.na(Sal_ppt), Sal_ppt])),
+                                                         ProgramLocationID == st &
+                                                         ManagedAreaName == of &
+                                                         !is.na(Sal_ppt), Sal_ppt])),
               by = c("id", "st", "of")]
 
 #create a column for identifying discrete vs. continuous stations
