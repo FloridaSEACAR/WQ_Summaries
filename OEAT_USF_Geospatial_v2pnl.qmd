@@ -1,0 +1,1505 @@
+---
+title: "OEAT/USF Water Quality Interpolation Project"
+author: "Stephen Durham"
+date: "02/27/2023"
+format:
+  html:
+    code-fold: true
+    embed-resources: true
+    theme: cosmo
+editor: visual
+editor_options: 
+  chunk_output_type: console
+---
+
+<!--     code-summary: "View code" -->
+
+<!--     code-tools: false -->
+
+<!--     embed-resources: true -->
+
+<!--     theme: cosmo -->
+
+<!--     number-sections: false -->
+
+<!--     page-layout: custom -->
+
+<!-- execute:  -->
+
+<!--   enabled: true -->
+
+<!--   cache: false -->
+
+```{r setup}
+#| echo: FALSE
+#| warning: FALSE
+#| error: FALSE
+#| message: FALSE
+
+library(tidyverse)
+library(data.table)
+library(scales)
+library(sf)
+library(gtable)
+library(grid)
+library(gridExtra)
+library(colorspace)
+library(here)
+library(pdftools)
+library(rpolars)
+library(lubridate)
+library(patchwork)
+library(mgcv)
+library(visreg)
+library(scattermore)
+
+#Should the geoplots be updated?
+update_geo_plots <- FALSE
+
+```
+
+```{r crop-hook}
+#| cache: FALSE
+#| echo: FALSE
+#| eval: FALSE
+#| include: FALSE
+
+knitr::knit_hooks$set(crop=hook_pdfcrop)
+
+```
+
+# Assigning seasons to continuous water quality monitoring time series
+
+<!-- Here I describe a potential method to assign seasons to the SEACAR continuous water quality monitoring data using running quantiles. I chose 5%, 50% and 95% running quantiles with roughly daily intervals (i.e., window width of 96 observations, assuming 15-minute data), but these options could of course be changed as needed. I also chose to test the method on salinity and temperature data from 2005 collected at station EB01 in Estero Bay Aquatic Preserve (southwest Florida). The idea would be to use the points at which the running quantiles cross some threshold values to delineate seasons in a reproducible way that is based on the data themselves. In this example I have used the 5%, 50%, and 95% quantiles of the whole year-long time series as the thresholds for determining the transition points between seasons. -->
+
+<!-- The time series data for both temperature and salinity showed seasonality in the running quartile data, but also substantial intra-season variation, and generalized additive model (GAM) fits to the running quartile data didn't cross their corresponding timeseries quantile values very much, if at all ({@fig-SeasonDef}A). However, daily coefficients of variation (CV) also showed some seasonal periodicity for both parameters, with the 5% and 95% quantile daily CV's being roughly anti-correlated ({@fig-SeasonDef}B). -->
+
+## Timeseries
+
+```{r SeasonDefTS}
+#| error: FALSE
+#| warning: FALSE
+#| message: FALSE
+
+mas <- c("Big Bend Seagrasses Aquatic Preserve", "Biscayne Bay Aquatic Preserve", "Estero Bay Aquatic Preserve", "Guana River Marsh Aquatic Preserve", "Gasparilla Sound-Charlotte Harbor Aquatic Preserve", "Matlacha Pass Aquatic Preserve", "Pine Island Sound Aquatic Preserve", "Cape Haze Aquatic Preserve")
+
+# mas <- c("Estero Bay Aquatic Preserve", "Guana River Marsh Aquatic Preserve")
+
+temps <- fread(here::here("Combined_WQ_WC_NUT_cont_Water_Temperature_SW-2022-Nov-16.txt"), sep = "|")
+sals <- fread(here::here("Combined_WQ_WC_NUT_cont_Salinity_SW-2022-Nov-16.txt"), sep = "|")
+
+# temps <- temps[ManagedAreaName %in% mas, ]
+# sals <- sals[ManagedAreaName %in% mas, ]
+
+temps_reg <- fread(here::here("Combined_WQ_WC_NUT_cont_Water_Temperature_SE-2022-Nov-16.txt"), sep = "|")
+sals_reg <- fread(here::here("Combined_WQ_WC_NUT_cont_Salinity_SE-2022-Nov-16.txt"), sep = "|")
+
+# temps_reg <- temps_reg[ManagedAreaName %in% mas, ]
+temps <- rbind(temps, temps_reg)
+# sals_reg <- sals_reg[ManagedAreaName %in% mas, ]
+sals <- rbind(sals, sals_reg)
+
+temps_reg <- fread(here::here("Combined_WQ_WC_NUT_cont_Water_Temperature_NE-2022-Nov-16.txt"), sep = "|")
+sals_reg <- fread(here::here("Combined_WQ_WC_NUT_cont_Salinity_NE-2022-Nov-16.txt"), sep = "|")
+
+# temps_reg <- temps_reg[ManagedAreaName %in% mas, ]
+temps <- rbind(temps, temps_reg)
+# sals_reg <- sals_reg[ManagedAreaName %in% mas, ]
+sals <- rbind(sals, sals_reg)
+
+temps_reg <- fread(here::here("Combined_WQ_WC_NUT_cont_Water_Temperature_NW-2022-Nov-16.txt"), sep = "|")
+sals_reg <- fread(here::here("Combined_WQ_WC_NUT_cont_Salinity_NW-2022-Nov-16.txt"), sep = "|")
+
+# temps_reg <- temps_reg[ManagedAreaName %in% mas, ]
+temps <- rbind(temps, temps_reg)
+# sals_reg <- sals_reg[ManagedAreaName %in% mas, ]
+sals <- rbind(sals, sals_reg)
+rm(temps_reg, sals_reg)
+
+setorder(temps, SampleDate)
+temps[, `:=` (order = seq(1, nrow(temps)), date_ind = rep(1L, nrow(temps)), ma_sta = paste0(ManagedAreaName, ", ", ProgramLocationID))]
+temps <- temps[ManagedAreaName %in% mas, ]
+for(sta in unique(temps$ProgramLocationID)){
+  if(length(setdiff(c(1:12), temps[ProgramLocationID == sta, unique(Month)])) > 0){
+    temps <- temps[ProgramLocationID != sta, ]
+  }
+}
+
+setorder(sals, SampleDate)
+sals[, `:=` (order = seq(1, nrow(sals)), date_ind = rep(1L, nrow(sals)), ma_sta = paste0(ManagedAreaName, ", ", ProgramLocationID))]
+sals <- sals[ManagedAreaName %in% mas, ]
+for(sta in unique(sals$ProgramLocationID)){
+  if(length(setdiff(c(1:12), sals[ProgramLocationID == sta, unique(Month)])) > 0){
+    sals <- sals[ProgramLocationID != sta, ]
+  }
+}
+
+temps2 <- temps[0]
+temps2[, SampleDate := date(SampleDate)]
+sals2 <- sals[0]
+sals2[, SampleDate := date(SampleDate)]
+
+for(loc in unique(c(temps$ma_sta, sals$ma_sta))){
+  dat_loc_t <- temps[ma_sta == loc, ]
+  dat_loc_t[, `:=` (date_ind = NULL, SampleDate = as.Date(SampleDate))]
+  dat_loc_s <- sals[ma_sta == loc, ]
+  dat_loc_s[, `:=` (date_ind = NULL, SampleDate = as.Date(SampleDate))]
+  
+  temp_mindate <- min(dat_loc_t$SampleDate)
+  temp_maxdate <- max(dat_loc_t$SampleDate)
+  sal_mindate <- min(dat_loc_s$SampleDate)
+  sal_maxdate <- max(dat_loc_s$SampleDate)
+
+  dates_temp_loc <- data.table(SampleDate = seq.Date(from = min(temp_mindate, sal_mindate), to = max(temp_maxdate, sal_maxdate), by = 'days'),
+                               ParameterName = dat_loc_t[ma_sta == loc, unique(ParameterName)],
+                               ParameterUnits = dat_loc_t[ma_sta == loc, unique(ParameterUnits)],
+                               ProgramLocationID = dat_loc_t[ma_sta == loc, unique(ProgramLocationID)],
+                               ManagedAreaName = dat_loc_t[ma_sta == loc, unique(ManagedAreaName)],
+                               Region = dat_loc_t[ma_sta == loc, unique(Region)],
+                               AreaID = dat_loc_t[ma_sta == loc, unique(AreaID)],
+                               date_ind = seq(1, length(seq.Date(from = min(temp_mindate, sal_mindate), to = max(temp_maxdate, sal_maxdate), by = 'days'))),
+                               ma_sta = loc)
+  dates_temp_loc[, SampleDate := as.Date(SampleDate)]
+  
+  dates_sal_loc <- data.table(SampleDate = seq.Date(from = min(temp_mindate, sal_mindate), to = max(temp_maxdate, sal_maxdate), by = 'days'),
+                               ParameterName = dat_loc_s[ma_sta == loc, unique(ParameterName)],
+                               ParameterUnits = dat_loc_s[ma_sta == loc, unique(ParameterUnits)],
+                               ProgramLocationID = dat_loc_s[ma_sta == loc, unique(ProgramLocationID)],
+                               ManagedAreaName = dat_loc_s[ma_sta == loc, unique(ManagedAreaName)],
+                               Region = dat_loc_s[ma_sta == loc, unique(Region)],
+                               AreaID = dat_loc_s[ma_sta == loc, unique(AreaID)],
+                               date_ind = seq(1, length(seq.Date(from = min(temp_mindate, sal_mindate), to = max(temp_maxdate, sal_maxdate), by = 'days'))),
+                               ma_sta = loc)
+  dates_sal_loc[, SampleDate := as.Date(SampleDate)]
+  
+  dat_loc_t2 <- merge(dat_loc_t, dates_temp_loc, all = TRUE)
+  temps2 <- rbind(temps2, dat_loc_t2)
+  dat_loc_s2 <- merge(dat_loc_s, dates_sal_loc, all = TRUE)
+  sals2 <- rbind(sals2, dat_loc_s2)
+  
+  rm(dat_loc_t, dat_loc_s, date_temp_loc, date_sal_loc, dat_loc_t2, dat_loc_s2)
+  #print(paste0("Done with ", loc, "!"))
+}
+
+temps2[, SampleDate := as.character(SampleDate)]
+
+temps3 <- pl$DataFrame(temps2)$as_data_frame()
+temps3 <- pl$DataFrame(temps3)$select(
+  pl$col("ResultValue")$rolling_quantile(quantile = 0.5, window_size = 96)$over("ProgramLocationID")$alias("d1_rollq50"),
+  pl$col("ResultValue")$rolling_quantile(quantile = 0.95, window_size = 96)$over("ProgramLocationID")$alias("d1_rollq95"),
+  pl$col("ResultValue")$rolling_quantile(quantile = 0.05, window_size = 96)$over("ProgramLocationID")$alias("d1_rollq05"),
+  # pl$col("ResultValue")$rolling_quantile(quantile = 0.5, window_size = 672)$over("ProgramLocationID")$alias("d7_rollq50"),
+  # pl$col("ResultValue")$rolling_quantile(quantile = 0.95, window_size = 672)$over("ProgramLocationID")$alias("d7_rollq95"),
+  # pl$col("ResultValue")$rolling_quantile(quantile = 0.05, window_size = 672)$over("ProgramLocationID")$alias("d7_rollq05"),
+  "ParameterName",
+  "ParameterUnits",
+  "ProgramLocationID",
+  "SampleDate",
+  "Year",
+  "Month",
+  "RelativeDepth",
+  "TotalDepth_m",
+  "ResultValue",
+  "ManagedAreaName",
+  "Region",
+  "SEACAR_EventID",
+  "AreaID",
+  "order",
+  "date_ind",
+  "ma_sta"
+  )$as_data_frame()
+
+setDT(temps3)
+temps3[, SampleDate := as.Date(SampleDate)]
+
+setorder(temps3, ManagedAreaName, ProgramLocationID, SampleDate)
+temps3[, `:=` (reading = seq(1, length(ResultValue)), ma_sta = paste0(ManagedAreaName, ", ", ProgramLocationID), param = "temp"), by = c("ManagedAreaName", "ProgramLocationID")]
+
+nrecs <- temps3 %>% group_by(param, ManagedAreaName, ProgramLocationID) %>% summarize(n_records = n())
+setDT(nrecs)
+nrecs_1k <- nrecs[n_records > 1000, ProgramLocationID]
+temps4 <- temps3[ProgramLocationID %in% nrecs_1k, ]
+
+#Salinity
+sals2[, SampleDate := as.character(SampleDate)]
+
+sals3 <- pl$DataFrame(sals2)$as_data_frame()
+sals3 <- pl$DataFrame(sals3)$select(
+  pl$col("ResultValue")$rolling_quantile(quantile = 0.5, window_size = 96)$over("ProgramLocationID")$alias("d1_rollq50"),
+  pl$col("ResultValue")$rolling_quantile(quantile = 0.95, window_size = 96)$over("ProgramLocationID")$alias("d1_rollq95"),
+  pl$col("ResultValue")$rolling_quantile(quantile = 0.05, window_size = 96)$over("ProgramLocationID")$alias("d1_rollq05"),
+  # pl$col("ResultValue")$rolling_quantile(quantile = 0.5, window_size = 288)$over("ProgramLocationID")$alias("d3_rollq50"),
+  # pl$col("ResultValue")$rolling_quantile(quantile = 0.95, window_size = 288)$over("ProgramLocationID")$alias("d3_rollq975"),
+  # pl$col("ResultValue")$rolling_quantile(quantile = 0.05, window_size = 288)$over("ProgramLocationID")$alias("d3_rollq025"),
+  # pl$col("ResultValue")$rolling_quantile(quantile = 0.5, window_size = 672)$over("ProgramLocationID")$alias("d7_rollq50"),
+  # pl$col("ResultValue")$rolling_quantile(quantile = 0.95, window_size = 672)$over("ProgramLocationID")$alias("d7_rollq95"),
+  # pl$col("ResultValue")$rolling_quantile(quantile = 0.05, window_size = 672)$over("ProgramLocationID")$alias("d7_rollq05"),
+  "ParameterName",
+  "ParameterUnits",
+  "ProgramLocationID",
+  "SampleDate",
+  "Year",
+  "Month",
+  "RelativeDepth",
+  "TotalDepth_m",
+  "ResultValue",
+  "ManagedAreaName",
+  "Region",
+  "SEACAR_EventID",
+  "AreaID",
+  "order",
+  "date_ind",
+  "ma_sta"
+  )$as_data_frame()
+
+setDT(sals3)
+sals3[, SampleDate := as.Date(SampleDate)]
+
+setorder(sals3, ManagedAreaName, ProgramLocationID, SampleDate)
+sals3[, `:=` (reading = seq(1, length(ResultValue)), ma_sta = paste0(ManagedAreaName, ", ", ProgramLocationID), param = "sal"), by = c("ManagedAreaName", "ProgramLocationID")]
+
+nrecs <- sals3 %>% group_by(param, ManagedAreaName, ProgramLocationID) %>% summarize(n_records = n())
+setDT(nrecs)
+nrecs_1k <- nrecs[n_records > 1000, ProgramLocationID]
+sals4 <- sals3[ProgramLocationID %in% nrecs_1k, ]
+
+tempsal2 <- rbind(temps4, sals4)
+salandtemp <- intersect(tempsal2[param == "temp", ma_sta], tempsal2[param == "sal", ma_sta])
+tempsal2 <- tempsal2[ma_sta %in% salandtemp, ]
+
+```
+
+```{r SeasonDefPlots1}
+#| error: FALSE
+#| warning: FALSE
+#| message: FALSE
+
+plots1 <- tempsal2 %>%
+  group_nest(ma_sta) %>%
+  deframe() %>%
+  map(., ~ {
+    setDT(.x)
+
+    neval_temp <- as.duration(int_length(interval(range(as_datetime(.x[param == "temp", SampleDate]))[1], range(as_datetime(.x[param == "temp", SampleDate]))[2])))/ddays(1)
+    kval_t <<- round(as.duration(int_length(interval(range(as_datetime(.x[param == "temp", SampleDate]))[1], range(as_datetime(.x[param == "temp", SampleDate]))[2])))/ddays(52))
+    tempbrks <- seq(.x[param == "temp", min(date_ind)], .x[param == "temp", max(date_ind)], by = round((.x[param == "temp", max(date_ind)] - .x[param == "temp", min(date_ind)])/6))
+    templabs <- .x[param == "temp" & date_ind %in% tempbrks, unique(SampleDate)]
+    
+    datsub_t <- .x[param == "temp" & reading %% 2 == 0 & !is.na(d1_rollq50), ]
+    
+    d1rq50_t <- gam(formula = d1_rollq50 ~ s(date_ind, bs = "cs", fx = TRUE, k = kval_t), data = datsub_t, control = list(nthreads = 4))
+    d1rq50_tp <- visreg(d1rq50_t, nn = neval_temp, gg = TRUE)
+    d1rq05_t <- gam(formula = d1_rollq05 ~ s(date_ind, bs = "cs", fx = TRUE, k = kval_t), data = datsub_t, control = list(nthreads = 4))
+    d1rq05_tp <- visreg(d1rq05_t, nn = neval_temp, gg = TRUE)
+    d1rq95_t <- gam(formula = d1_rollq95 ~ s(date_ind, bs = "cs", fx = TRUE, k = kval_t), data = datsub_t, control = list(nthreads = 4))
+    d1rq95_tp <- visreg(d1rq95_t, nn = neval_temp, gg = TRUE)
+
+    neval_sal <- as.duration(int_length(interval(range(as_datetime(.x[param == "sal", SampleDate]))[1], range(as_datetime(.x[param == "sal", SampleDate]))[2])))/ddays(1)
+    kval_s <<- round(as.duration(int_length(interval(range(as_datetime(.x[param == "sal", SampleDate]))[1], range(as_datetime(.x[param == "sal", SampleDate]))[2])))/ddays(52))
+    salbrks <- seq(.x[param == "sal", min(date_ind)], .x[param == "sal", max(date_ind)], by = round((.x[param == "sal", max(date_ind)] - .x[param == "sal", min(date_ind)])/6))
+    sallabs <- .x[param == "sal" & date_ind %in% salbrks, unique(SampleDate)]
+    
+    datsub_s <- .x[param == "sal" & reading %% 2 == 0 & !is.na(d1_rollq50), ]
+        
+    d1rq50_s <- gam(formula = d1_rollq50 ~ s(date_ind, bs = "cs", fx = TRUE, k = kval_s), data = datsub_s, control = list(nthreads = 4))
+    d1rq50_sp <- visreg(d1rq50_s, nn = neval_sal, gg = TRUE)
+    d1rq05_s <- gam(formula = d1_rollq05 ~ s(date_ind, bs = "cs", fx = TRUE, k = kval_s), data = datsub_s, control = list(nthreads = 4))
+    d1rq05_sp <- visreg(d1rq05_s, nn = neval_sal, gg = TRUE)
+    d1rq95_s <- gam(formula = d1_rollq95 ~ s(date_ind, bs = "cs", fx = TRUE, k = kval_s), data = datsub_s, control = list(nthreads = 4))
+    d1rq95_sp <- visreg(d1rq95_s, nn = neval_sal, gg = TRUE)
+
+    temp_rollq_big <- ggplot(data = .x[param == "temp" & reading %% 2 == 0 & !is.na(d1_rollq50), ]) +
+      # geom_point(aes(x = date_ind, y = d1_rollq50, color = "rollq50"), alpha = 0.15) +
+      # geom_point(aes(x = date_ind, y = d1_rollq95, color = "rollq95"), alpha = 0.15) +
+      # geom_point(aes(x = date_ind, y = d1_rollq05, color = "rollq05"), alpha = 0.15) +
+      geom_scattermore(aes(x = date_ind, y = d1_rollq50, color = "rollq50"), alpha = 0.15, pointsize = 1.8, pixels = c(1700, 1000), interpolate = TRUE) +
+      geom_scattermore(aes(x = date_ind, y = d1_rollq95, color = "rollq95"), alpha = 0.15, pointsize = 1.8, pixels = c(1700, 1000), interpolate = TRUE) +
+      geom_scattermore(aes(x = date_ind, y = d1_rollq05, color = "rollq05"), alpha = 0.15, pointsize = 1.8, pixels = c(1700, 1000), interpolate = TRUE) +
+      geom_hline(aes(yintercept = quantile(.x[param == "temp" & reading %% 2 == 0, ResultValue], probs = c(0.5), na.rm = TRUE), color = "rawq50"), lwd = 1.25) +
+      geom_hline(aes(yintercept = quantile(.x[param == "temp" & reading %% 2 == 0, ResultValue], probs = c(0.95), na.rm = TRUE), color = "rawq95"), lwd = 1.25) +
+      geom_hline(aes(yintercept = quantile(.x[param == "temp" & reading %% 2 == 0, ResultValue], probs = c(0.05), na.rm = TRUE), color = "rawq05"), lwd = 1.25) +
+      # geom_smooth(aes(x = date_ind, y = d1_rollq50, color = "gam50"), method = "gam", formula = y ~ s(x, bs = "cs", fx = TRUE, k = kval), n = neval_temp) +
+      # geom_smooth(aes(x = date_ind, y = d1_rollq95, color = "gam95"), method = "gam", formula = y ~ s(x, bs = "cs", fx = TRUE, k = kval), n = neval_temp) +
+      # geom_smooth(aes(x = date_ind, y = d1_rollq05, color = "gam05"), method = "gam", formula = y ~ s(x, bs = "cs", fx = TRUE, k = kval), n = neval_temp) +
+      geom_line(data = ggplot_build(d1rq05_tp)$data[[3]], aes(x = x, y = y, color = "gam05"), lwd = 1) +
+      geom_line(data = ggplot_build(d1rq95_tp)$data[[3]], aes(x = x, y = y, color = "gam95"), lwd = 1) +
+      geom_line(data = ggplot_build(d1rq50_tp)$data[[3]], aes(x = x, y = y, color = "gam50"), lwd = 1) +
+      scale_color_manual(values = c("rollq50" = "black", "rollq95" = "red", "rollq05" = "blue", "rawq50" = "grey50", "rawq95" = "firebrick", "rawq05" = "dodgerblue", "gam50" = "white", "gam95" = "light pink", "gam05" = "light blue"),
+                         labels = c("5%", "50%", "95%", "Raw data 5%", "Raw data 50%", "Raw data 95%", "GAM fit 5%", "GAM fit 50%", "GAM fit 95%")) +
+      scale_x_continuous(breaks = tempbrks, labels = templabs) +
+      theme_bw() +
+      labs(y = "Temperature (C)", x = "Sample date") +
+      theme(axis.title.x = element_blank(),
+            legend.title = element_blank(),
+            legend.key = element_rect(fill = "grey70"),
+            panel.grid.minor.x = element_blank())
+
+    
+    sal_rollq_big <- ggplot(data = .x[param == "sal" & reading %% 2 == 0 & !is.na(d1_rollq50), ]) +
+      # geom_point(aes(x = date_ind, y = d1_rollq50, color = "rollq50"), alpha = 0.15) +
+      # geom_point(aes(x = date_ind, y = d1_rollq95, color = "rollq95"), alpha = 0.15) +
+      # geom_point(aes(x = date_ind, y = d1_rollq05, color = "rollq05"), alpha = 0.15) +
+      geom_scattermore(aes(x = date_ind, y = d1_rollq50, color = "rollq50"), alpha = 0.15, alpha = 0.15, pointsize = 1.8, pixels = c(1700, 1000), interpolate = TRUE) +
+      geom_scattermore(aes(x = date_ind, y = d1_rollq95, color = "rollq95"), alpha = 0.15, alpha = 0.15, pointsize = 1.8, pixels = c(1700, 1000), interpolate = TRUE) +
+      geom_scattermore(aes(x = date_ind, y = d1_rollq05, color = "rollq05"), alpha = 0.15, alpha = 0.15, pointsize = 1.8, pixels = c(1700, 1000), interpolate = TRUE) +
+      geom_hline(aes(yintercept = quantile(.x[param == "sal" & reading %% 2 == 0, ResultValue], probs = c(0.5), na.rm = TRUE), color = "rawq50"), lwd = 1.25) +
+      geom_hline(aes(yintercept = quantile(.x[param == "sal" & reading %% 2 == 0, ResultValue], probs = c(0.95), na.rm = TRUE), color = "rawq95"), lwd = 1.25) +
+      geom_hline(aes(yintercept = quantile(.x[param == "sal" & reading %% 2 == 0, ResultValue], probs = c(0.05), na.rm = TRUE), color = "rawq05"), lwd = 1.25) +
+      # geom_smooth(aes(x = date_ind, y = d1_rollq50, color = "gam50"), method = "gam", formula = y ~ s(x, bs = "cs", fx = TRUE, k = 50), n = neval_sal) +
+      # geom_smooth(aes(x = date_ind, y = d1_rollq95, color = "gam95"), method = "gam", formula = y ~ s(x, bs = "cs", fx = TRUE, k = 50), n = neval_sal) +
+      # geom_smooth(aes(x = date_ind, y = d1_rollq05, color = "gam05"), method = "gam", formula = y ~ s(x, bs = "cs", fx = TRUE, k = 50), n = neval_sal) +
+      geom_line(data = ggplot_build(d1rq05_sp)$data[[3]], aes(x = x, y = y, color = "gam05"), lwd = 1) +
+      geom_line(data = ggplot_build(d1rq95_sp)$data[[3]], aes(x = x, y = y, color = "gam95"), lwd = 1) +
+      geom_line(data = ggplot_build(d1rq50_sp)$data[[3]], aes(x = x, y = y, color = "gam50"), lwd = 1) +
+      scale_color_manual(values = c("rollq50" = "black", "rollq95" = "red", "rollq05" = "blue", "rawq50" = "grey50", "rawq95" = "firebrick", "rawq05" = "dodgerblue", "gam50" = "white", "gam95" = "light pink", "gam05" = "light blue"),
+                         labels = c("5%", "50%", "95%", "Raw data 5%", "Raw data 50%", "Raw data 95%", "GAM fit 5%", "GAM fit 50%", "GAM fit 95%")) +
+      scale_x_continuous(breaks = salbrks, labels = sallabs) +
+      theme_bw() +
+      labs(y = "Salinity (ppt)", x = "Sample date") +
+      theme(axis.title.x = element_blank(),
+            legend.title = element_blank(),
+            legend.key = element_rect(fill = "grey70"),
+            panel.grid.minor.x = element_blank())
+    
+    temp_rollq_big / sal_rollq_big + plot_layout(guides = "collect") + plot_annotation(tag_levels = c("A", "B"), title = paste0(unique(.x$ProgramLocationID), ", ", unique(.x$ManagedAreaName)))
+  })
+
+```
+
+::: column-page
+::: panel-tabset
+```{r SeasonDefPlots1Print}
+#| results: asis
+#| error: FALSE
+#| warning: FALSE
+#| message: FALSE
+
+# , results='asis', warning=FALSE, error=FALSE
+#, fig.cap="Time series plots of ~daily running quantile values (5%, 50%, and 95%) for (A) temperature and (B) salinity, including corresponding GAM fits showing the smoothed pattern over time."
+# results: asis
+# warning: FALSE
+# error: FALSE
+# label: fig-2015datSeasonOverlayTemp
+# fig-cap: "Plots from @fig-2015datplots2Temp with color-shaded regions to show the season determinations."
+
+# iwalk(plots1, ~ {
+#   cat('## ', .y, '\n\n')
+#   
+#   print(.x)
+# 
+#   cat('\n\n')
+# })
+
+# for(p in seq_along(plots1)){
+#   cat("\n\n## ", names(plots1)[p], "\n\n")
+#   print(plots1[[p]])
+# }
+
+for(p in unique(tempsal2$ManagedAreaName)){
+  cat("\n\n## ", p, "\n\n")
+  for(pp in plots1[which(str_detect(names(plots1), p))]){
+   print(pp)
+   cat("\n\n")
+  }
+}
+
+```
+:::
+:::
+
+## Rates of change
+
+```{r RatePlotsPrep}
+#| error: FALSE
+#| warning: FALSE
+#| message: FALSE
+
+tempsal3 <- data.table(SampleDate = Date(),
+                       date_ind = numeric(),
+                       ma_sta = character(),
+                       d1_rollq50 = numeric(),
+                       d1_rollq95 = numeric(),
+                       d1_rollq05 = numeric(),
+                       ParameterName = character(),
+                       ParameterUnits = character(),
+                       ProgramLocationID = character(),
+                       Year = integer(),
+                       Month = integer(),
+                       RelativeDepth = character(),
+                       TotalDepth_m = numeric(),
+                       ResultValue = numeric(),
+                       ManagedAreaName = character(),
+                       Region = character(),
+                       SEACAR_EventID = character(),
+                       AreaID = integer(),
+                       reading = integer(),
+                       param = character(),
+                       x = numeric(),
+                       y = numeric(),
+                       rate = numeric(),
+                       season = character(),
+                       ind = integer(),
+                       SeqN = integer())
+
+fails <- data.table(ma_sta = character(),
+                    param = character(),
+                    object = character(),
+                    error = character())
+
+for(p in plots1){
+  gamfit_q50 <- ggplot_build(p[[1]])$data[[9]]
+  gamfit_sal_q50 <- ggplot_build(p[[2]])$data[[9]]
+  
+  setDT(gamfit_q50)
+  gamfit_q50 <- gamfit_q50[!is.na(y), .(x, y)]
+  gamfit_q50[, `:=` (date_ind = round(x), rate = shift(y, n = 1, type = "lead") - y, ma_sta = paste0(unique(p[[1]]$data$ManagedAreaName), ", ", unique(p[[1]]$data$ProgramLocationID)))]
+  
+  p_temp <- p[[1]]$data
+  p_temp[, ma_sta := paste0(ManagedAreaName, ", ", ProgramLocationID)]
+  p_temp2 <- try(merge(p_temp, gamfit_q50, by = c("ma_sta", "date_ind"), all = TRUE), silent = TRUE)
+  
+  if("try-error" %in% unique(class(p_temp2))){
+    fails_x <- data.table(ma_sta = unique(p_temp$ma_sta),
+                          param = "temp",
+                          object = "p_temp2",
+                          error = p_temp2[1])
+    
+    fails <- rbind(fails, fails_x)
+  }
+  
+  # dates_temp <- data.table(SampleDate = seq.Date(from = min(min(gamfit_q50$SampleDate), min(temps2[ma_sta == paste0(unique(p[[1]]$data$ManagedAreaName), ", ", unique(p[[1]]$data$ProgramLocationID)), SampleDate])), to = max(max(gamfit_q50$SampleDate), max(temps2[ma_sta == paste0(unique(p[[1]]$data$ManagedAreaName), ", ", unique(p[[1]]$data$ProgramLocationID)), SampleDate])), by = 'days'))
+
+  # gamfit_q502 <- merge(p_temp2, gamfit_q50, all.x = TRUE)
+
+  # gamfit_q503 <- merge(gamfit_q502, distinct(temps2[param == "temp" & ProgramLocationID == unique(p[[1]]$data$ProgramLocationID), .(SampleDate, ma_sta)]), all.x = TRUE)
+  
+  # setnames(gamfit_q50, "x", "SampleDate")
+  
+  setDT(gamfit_sal_q50)
+  gamfit_sal_q50 <- gamfit_sal_q50[!is.na(y), .(x, y)]
+  gamfit_sal_q50[, `:=` (date_ind = round(x), rate = shift(y, n = 1, type = "lead") - y, ma_sta = paste0(unique(p[[2]]$data$ManagedAreaName), ", ", unique(p[[2]]$data$ProgramLocationID)))]
+  
+  p_sal <- p[[2]]$data
+  p_sal[, ma_sta := paste0(ManagedAreaName, ", ", ProgramLocationID)]
+  p_sal2 <- try(merge(p_sal, gamfit_sal_q50, by = c("ma_sta", "date_ind"), all = TRUE), silent = TRUE)
+  
+  if("try-error" %in% unique(class(p_sal2))){
+    fails_x <- data.table(ma_sta = unique(p_sal$ma_sta),
+                          param = "sal",
+                          object = "p_sal2",
+                          error = p_sal2[1])
+    
+    fails <- rbind(fails, fails_x)
+  }
+  
+  if("try-error" %in% unique(class(p_temp2)) | "try-error" %in% unique(class(p_sal2))){
+    tempsal2 <- tempsal2[ma_sta != unique(p_temp$ma_sta), ]
+    next
+  }
+    
+  p_temp2[is.na(ResultValue), `:=` (d1_rollq50 = NA, d1_rollq95 = NA, d1_rollq05 = NA, x = NA, y = NA, rate = NA)]
+    
+  p_sal2[is.na(ResultValue), `:=` (d1_rollq50 = NA, d1_rollq95 = NA, d1_rollq05 = NA, x = NA, y = NA, rate = NA)]
+  # setnames(gamfit_sal_q50, "x", "SampleDate")
+  
+  temps3 <- distinct(merge(distinct(tempsal2[param == "temp" & ProgramLocationID == unique(p[[1]]$data$ProgramLocationID), .(SampleDate, Year, Month, ma_sta, date_ind, param)]), p_temp2[, .(AreaID, d1_rollq05, d1_rollq50, d1_rollq95, date_ind, ma_sta, ManagedAreaName, ParameterName, ParameterUnits, ProgramLocationID, rate, reading, Region, RelativeDepth, ResultValue, SEACAR_EventID, TotalDepth_m, x, y)], by = c("ma_sta", "date_ind"), all = TRUE)) #c("param", "ma_sta", "date_ind", "SampleDate", "Year", "Month")
+  setDT(temps3)
+  # temps3[, `:=` (rate2 = rate, y2 = y)]
+  
+  # sals3 <- merge(sals2, gamfit_sal_q50)
+  sals3 <- distinct(merge(distinct(tempsal2[param == "sal" & ProgramLocationID == unique(p[[2]]$data$ProgramLocationID), .(SampleDate, Year, Month, ma_sta, date_ind, param)]), p_sal2[, .(AreaID, d1_rollq05, d1_rollq50, d1_rollq95, date_ind, ma_sta, ManagedAreaName, ParameterName, ParameterUnits, ProgramLocationID, rate, reading, Region, RelativeDepth, ResultValue, SEACAR_EventID, TotalDepth_m, x, y)], by = c("ma_sta", "date_ind"), all = TRUE))
+  setDT(sals3)
+  
+
+  
+  # temps3[!is.na(rate), season := fcase(rate > quantile(rate, probs = c(0.66), na.rm = TRUE) &
+  #                                        y >= temps3[!is.na(rate) & date_ind == x - 1, unique(y)] &
+  #                                        y <= temps3[!is.na(rate) & date_ind == x + 1, unique(y)] &
+  #                                        Month %in% c(1:7), "Spring",
+  #                                      rate < quantile(rate, probs = c(0.33), na.rm = TRUE) &
+  #                                        y <= temps3[!is.na(rate) & date_ind == date_ind - 1, unique(y)] &
+  #                                        y >= temps3[!is.na(rate) & date_ind == date_ind + 1, unique(y)] &
+  #                                        Month %in% c(5:12), "Fall",
+  #                                      rate <= quantile(rate, probs = c(0.66), na.rm = TRUE) &
+  #                                        rate >= quantile(rate, probs = c(0.33), na.rm = TRUE) &
+  #                                        y > median(y) &
+  #                                        Month %in% c(3:10), "Summer",
+  #                                      rate <= quantile(rate, probs = c(0.66), na.rm = TRUE) &
+  #                                        rate >= quantile(rate, probs = c(0.33), na.rm = TRUE) & 
+  #                                        y < median(y) &
+  #                                        Month %in% c(1:4, 9:12), "Winter")]
+  temps3[!is.na(rate), season := fcase(rate > quantile(rate, probs = c(0.66), na.rm = TRUE), "Spring",
+                                       rate < quantile(rate, probs = c(0.33), na.rm = TRUE), "Fall",
+                                       rate <= quantile(rate, probs = c(0.66), na.rm = TRUE) &
+                                         rate >= quantile(rate, probs = c(0.33), na.rm = TRUE) &
+                                         y > median(y), "Summer",
+                                       rate <= quantile(rate, probs = c(0.66), na.rm = TRUE) &
+                                         rate >= quantile(rate, probs = c(0.33), na.rm = TRUE) & 
+                                         y < median(y), "Winter")]
+  seasons_temps3 <- distinct(temps3[, SeqN := .N, by = rleid(season)][, .(ma_sta, date_ind, SampleDate, Year, Month, season, SeqN)])
+  
+  
+  sals3[!is.na(rate), season := fcase(rate > quantile(sals3$rate, probs = c(0.66), na.rm = TRUE), "Wetter",
+                                       rate < quantile(sals3$rate, probs = c(0.33), na.rm = TRUE), "Drier",
+                                       rate <= quantile(sals3$rate, probs = c(0.66), na.rm = TRUE) &
+                                         rate >= quantile(sals3$rate, probs = c(0.33), na.rm = TRUE) & 
+                                         y > median(y), "Wet",
+                                       rate <= quantile(sals3$rate, probs = c(0.66), na.rm = TRUE) &
+                                         rate >= quantile(sals3$rate, probs = c(0.33), na.rm = TRUE) & 
+                                         y < median(y), "Dry")]
+  seasons_sals3 <- distinct(sals3[, SeqN := .N, by = rleid(season)][, .(ma_sta, date_ind, SampleDate, Year, Month, season, SeqN)])
+  
+  temps3[!is.na(rate), ind := seq(1, nrow(p_temp2[!is.na(rate), ]))]
+  sals3[!is.na(rate), ind := seq(1, nrow(p_sal2[!is.na(rate), ]))]
+  
+  tempsal3_p <- rbind(temps3, sals3)
+  tempsal3 <- rbind(tempsal3, tempsal3_p)
+  
+  #print(paste0(which(str_detect(names(plots1), unique(p[[1]]$data$ProgramLocationID))), "/", length(plots1), " done!"))
+}
+
+#rm(gamfit_q50, gamfit_sal_q50, temps2, sals2)
+tempsal3[, season := factor(season, levels = c("Winter", "Dry", "Spring", "Wetter", "Summer", "Wet", "Fall", "Drier", NA), ordered = TRUE)]
+
+seasonlist <- sort(tempsal3[!is.na(season), unique(season)])
+seacolslist <- sequential_hcl(8, palette = "Viridis")
+seacols <- setNames(seacolslist, seasonlist)
+
+plots2 <- tempsal3 %>%
+  group_nest(ma_sta) %>% 
+  deframe() %>% 
+  map(., ~ {
+    setDT(.x)
+    
+    tempbrks <- seq(.x[param == "temp", min(date_ind)], .x[param == "temp", max(date_ind)], by = round((.x[param == "temp", max(date_ind)] - .x[param == "temp", min(date_ind)])/4))
+    templabs <- .x[param == "temp" & date_ind %in% tempbrks, unique(SampleDate)]
+
+    salbrks <- seq(.x[param == "sal", min(date_ind)], .x[param == "sal", max(date_ind)], by = round((.x[param == "sal", max(date_ind)] - .x[param == "sal", min(date_ind)])/4))
+    sallabs <- .x[param == "sal" & date_ind %in% salbrks, unique(SampleDate)]
+    
+    rateplot1 <- ggplot(.x[!is.na(rate) & param == "temp", ], aes(x = date_ind, y = rate)) + 
+      geom_point() +
+      geom_hline(aes(yintercept = quantile(.x[!is.na(rate) & param == "temp", rate], probs = c(0.33), na.rm = TRUE), color = "neg"), lwd = 1.25) +
+      geom_hline(aes(yintercept = quantile(.x[!is.na(rate) & param == "temp", rate], probs = c(0.66), na.rm = TRUE), color = "pos"), lwd = 1.25) + 
+      theme_bw() +
+      scale_color_manual(values = c(pos = "red", neg = "blue"), labels = c("increasing", "decreasing")) + #
+      # scale_x_date(limits = c(range(as.Date(.x$SampleDate))[1], range(as.Date(.x$SampleDate))[2])) +
+      scale_x_continuous(breaks = tempbrks, labels = templabs) +
+      labs(x = "Sample date", y = "Rate of temperature change (~daily)", color = "Season threshold") +
+      theme(legend.key = element_rect(fill = "grey70"))
+    
+    rateplot1_sal <- ggplot(.x[param == "sal", ], aes(x = date_ind, y = rate)) +
+      geom_point() +
+      geom_hline(aes(yintercept = quantile(.x[param == "sal", rate], probs = c(0.33), na.rm = TRUE), color = "neg"), lwd = 1.25) +
+      geom_hline(aes(yintercept = quantile(.x[param == "sal", rate], probs = c(0.66), na.rm = TRUE), color = "pos"), lwd = 1.25) +
+      theme_bw() +
+      scale_color_manual(values = c(pos = "red", neg = "blue"), labels = c("increasing", "decreasing")) + #
+      # scale_x_date(limits = c(range(as.Date(.x$SampleDate))[1], range(as.Date(.x$SampleDate))[2])) +
+      scale_x_continuous(breaks = salbrks, labels = sallabs) +
+      labs(x = "Sample date", y = "Rate of salinity change (~daily)", color = "Season threshold") +
+      theme(legend.key = element_rect(fill = "grey70"))
+
+    rateplot2 <- ggplot(data = .x[param == "temp", ]) +
+      geom_point(aes(x = date_ind, y = y, color = season, size = abs(rate))) +
+      theme_bw() +
+      # scale_x_date(limits = c(range(as.Date(.x$SampleDate))[1], range(as.Date(.x$SampleDate))[2])) +
+      scale_x_continuous(breaks = tempbrks, labels = templabs) +
+      scale_size(limits = c(min(abs(.x$rate)), max(abs(.x$rate))), breaks = c(0.05, 0.10, 0.15, 0.20), range = c(0.5, 3.5), ) +
+      scale_fill_manual(values = subset(seacols, names(seacols) %in% unique(.x$season))) +
+      labs(x = "Sample date", y = "Temperature (deg. C)", color = "Temp. season", size = "Rate of change") +
+      theme(legend.key = element_rect(fill = "grey70"))
+
+    rateplot2_sal <- ggplot(data = .x[param == "sal", ]) +
+      geom_point(aes(x = date_ind, y = y, color = season, size = abs(rate))) +
+      theme_bw() +
+      # scale_x_date(limits = c(range(as.Date(.x$SampleDate))[1], range(as.Date(.x$SampleDate))[2])) +
+      scale_x_continuous(breaks = salbrks, labels = sallabs) +
+      scale_size(limits = c(min(abs(.x$rate)), max(abs(.x$rate))), breaks = c(0.05, 0.10, 0.15, 0.20), range = c(0.5, 3.5), guide = "none") +
+      scale_fill_manual(values = subset(seacols, names(seacols) %in% unique(.x$season))) +
+      labs(x = "Sample date", y = "Salinity (ppt)", color = "Sal. season") +
+      theme(legend.key = element_rect(fill = "grey70"))
+
+    .x[is.na(ProgramLocationID), `:=` (ProgramLocationID = .x[!is.na(ProgramLocationID), unique(ProgramLocationID)], ManagedAreaName = .x[!is.na(ProgramLocationID), unique(ManagedAreaName)])]
+    
+    (rateplot1 + rateplot1_sal) / (rateplot2 + rateplot2_sal) + plot_layout(guides = "collect") + plot_annotation(tag_levels = c("A", "B", "C", "D"), title = paste0(unique(.x$ProgramLocationID), ", ", unique(.x$ManagedAreaName)))
+
+})
+
+```
+
+<!-- ::: {#test .panel-tabset} -->
+
+<!-- ## Big Bend Seagrasses Aquatic Preserve, BBSST -->
+
+<!-- ![](images/TAscalecompare_annotated.png) -->
+
+<!-- ## Estero Bay Aquatic Preserve, EB02 -->
+
+<!-- ::: panel-tabset -->
+
+<!-- ## subTab 1 -->
+
+<!-- | Col1 | Col2 | Col3 | -->
+
+<!-- |------|------|------| -->
+
+<!-- | 123  | sdg  | adgf | -->
+
+<!-- | 566  | adfg | adg  | -->
+
+<!-- | wqe  | adfg | aa   | -->
+
+<!-- ## subTab 2 -->
+
+<!-- | ColA | ColB | ColC | -->
+
+<!-- |------|------|------| -->
+
+<!-- | hj   | hjk  | hjk  | -->
+
+<!-- | hjk  | hjk  | ll   | -->
+
+<!-- | h    | nmnm | hj   | -->
+
+<!-- ## subTab3 -->
+
+<!-- ```{r} -->
+
+<!-- print(plots1[[2]]) -->
+
+<!-- ``` -->
+
+<!-- ::: -->
+
+<!-- ## Tab 3 -->
+
+<!-- This is tab 3! -->
+
+<!-- ::: -->
+
+::: column-page
+::: panel-tabset
+```{r RatePlotsPrint}
+#| results: asis
+#| error: FALSE
+#| warning: FALSE
+#| message: FALSE
+
+#, fig.cap="Time series plots of ~daily rate of change for (A) temperature and (B) salinity with 33% and 66% quantiles of rate marked as horizontal lines, as well as the corresponding seasons when these rate quantiles are used to define them for (C) temperature and (D) salinity. Note that size of the data points in panels (C) and (D) corresponds to the rate values shown in panels (A) and (B)."
+# results: asis
+# warning: FALSE
+# error: FALSE
+# label: fig-2015datSeasonOverlayTemp
+# fig-cap: "Plots from @fig-2015datplots2Temp with color-shaded regions to show the season determinations."
+
+# for(p2 in seq_along(plots2)){
+#   cat("\n\n## ", names(plots2)[p2], "\n\n")
+#   print(plots2[[p2]])
+# }
+
+for(p2 in unique(tempsal2$ManagedAreaName)){
+  cat("\n\n## ", p2, "\n\n")
+  for(pp2 in plots2[which(str_detect(names(plots2), p2))]){
+   print(pp2)
+   cat("\n\n")
+  }
+}
+
+```
+:::
+:::
+
+## Season specification
+
+```{r SeasonDefPlotsPrep}
+#| error: FALSE
+#| warning: FALSE
+#| message: FALSE
+
+seasons_tempsal2 <- data.table(param = character(),
+                               ma_sta = character(),
+                               season = character(),
+                               SeqN = integer(),
+                               st_reading = integer(),
+                               en_reading = integer(),
+                               st_SampDate = Date(),
+                               en_SampDate = Date(),
+                               st_Year = integer(),
+                               en_Year = integer(),
+                               st_Month = integer(),
+                               en_Month = integer(),
+                               xmin = numeric(),
+                               xmax = numeric(),
+                               ymin = numeric(),
+                               ymax = numeric(),
+                               viewymin = integer(),
+                               viewymax = integer())
+
+tempsal3[is.na(Year), Year := year(SampleDate)]
+tempsal3[is.na(Month), Month := month(SampleDate)]
+
+for(i in unique(tempsal3$ma_sta)){
+  seasons_temp <- tempsal3[param == "temp" & ma_sta == i & !is.na(season), .(ma_sta, season)]
+  seasons_temp2 <- distinct(seasons_temp[, SeqN := .N, by = rleid(season)])
+  seasons_temp2[, param := "temp"]
+  
+  seasons_sal <- tempsal3[param == "sal" & ma_sta == i & !is.na(season), .(ma_sta, season)]
+  seasons_sal2 <- distinct(seasons_sal[, SeqN := .N, by = rleid(season)])
+  seasons_sal2[, param := "sal"]
+  
+  for(r in seq(1, nrow(seasons_temp2))){
+    if(r == 1){
+      n <- seasons_temp2[r, SeqN]
+      seasons_temp2[r, `:=` (st_reading = tempsal3[param == "temp" & ma_sta == i & !is.na(rate) & ind == 1, reading], 
+                             en_reading = tempsal3[param == "temp" & ma_sta == i & !is.na(rate) & ind == n, reading],
+                             st_SampDate = tempsal3[param == "temp" & ma_sta == i & !is.na(rate) & ind == 1, SampleDate], 
+                             en_SampDate = tempsal3[param == "temp" & ma_sta == i & !is.na(rate) & ind == n, SampleDate],
+                             st_Year = tempsal3[param == "temp" & ma_sta == i & !is.na(rate) & ind == 1, Year], 
+                             en_Year = tempsal3[param == "temp" & ma_sta == i & !is.na(rate) & ind == n, Year],
+                             st_Month = tempsal3[param == "temp" & ma_sta == i & !is.na(rate) & ind == 1, Month], 
+                             en_Month = tempsal3[param == "temp" & ma_sta == i & !is.na(rate) & ind == n, Month])]
+    } else{
+      n1 <- n + 1
+      n2 <- n + seasons_temp2[r, SeqN]
+      seasons_temp2[r, `:=` (st_reading = tempsal3[param == "temp" & ma_sta == i & !is.na(rate) & ind == n1, reading], 
+                             en_reading = tempsal3[param == "temp" & ma_sta == i & !is.na(rate) & ind == n2, reading],
+                             st_SampDate = tempsal3[param == "temp" & ma_sta == i & !is.na(rate) & ind == n1, SampleDate], 
+                             en_SampDate = tempsal3[param == "temp" & ma_sta == i & !is.na(rate) & ind == n2, SampleDate],
+                             st_Year = tempsal3[param == "temp" & ma_sta == i & !is.na(rate) & ind == n1, Year], 
+                             en_Year = tempsal3[param == "temp" & ma_sta == i & !is.na(rate) & ind == n2, Year],
+                             st_Month = tempsal3[param == "temp" & ma_sta == i & !is.na(rate) & ind == n1, Month], 
+                             en_Month = tempsal3[param == "temp" & ma_sta == i & !is.na(rate) & ind == n2, Month])]
+      n <- n2
+    }
+  }
+  
+  for(r in seq(1, nrow(seasons_sal2))){
+    if(r == 1){
+      n <- seasons_sal2[r, SeqN]
+      seasons_sal2[r, `:=` (st_reading = tempsal3[param == "sal" & ma_sta == i & !is.na(rate) & ind == 1, reading], 
+                            en_reading = tempsal3[param == "sal" & ma_sta == i & !is.na(rate) & ind == n, reading],
+                            st_SampDate = tempsal3[param == "sal" & ma_sta == i & !is.na(rate) & ind == 1, SampleDate], 
+                            en_SampDate = tempsal3[param == "sal" & ma_sta == i & !is.na(rate) & ind == n, SampleDate],
+                            st_Year = tempsal3[param == "sal" & ma_sta == i & !is.na(rate) & ind == 1, Year], 
+                            en_Year = tempsal3[param == "sal" & ma_sta == i & !is.na(rate) & ind == n, Year],
+                            st_Month = tempsal3[param == "sal" & ma_sta == i & !is.na(rate) & ind == 1, Month], 
+                            en_Month = tempsal3[param == "sal" & ma_sta == i & !is.na(rate) & ind == n, Month])]
+    } else{
+      n1 <- n + 1
+      n2 <- n + seasons_sal2[r, SeqN]
+      seasons_sal2[r, `:=` (st_reading = tempsal3[param == "sal" & ma_sta == i & !is.na(rate) & ind == n1, reading], 
+                            en_reading = tempsal3[param == "sal" & ma_sta == i & !is.na(rate) & ind == n2, reading],
+                            st_SampDate = tempsal3[param == "sal" & ma_sta == i & !is.na(rate) & ind == n1, SampleDate], 
+                            en_SampDate = tempsal3[param == "sal" & ma_sta == i & !is.na(rate) & ind == n2, SampleDate],
+                            st_Year = tempsal3[param == "sal" & ma_sta == i & !is.na(rate) & ind == n1, Year], 
+                            en_Year = tempsal3[param == "sal" & ma_sta == i & !is.na(rate) & ind == n2, Year],
+                            st_Month = tempsal3[param == "sal" & ma_sta == i & !is.na(rate) & ind == n1, Month], 
+                            en_Month = tempsal3[param == "sal" & ma_sta == i & !is.na(rate) & ind == n2, Month])]
+      n <- n2
+    }
+  }
+  
+  # for(r in seq(1:nrow(seasons_temp2))){
+  #   seasons_temp2[r, transitions := ifelse(r == 1, st_reading, seasons_temp2[r - 1, en_reading] + (st_reading - seasons_temp2[r - 1, en_reading])/2)]
+  # }
+  # 
+  # for(r in seq(1:nrow(seasons_sal2))){
+  #   seasons_sal2[r, transitions := ifelse(r == 1, st_reading, seasons_sal2[r - 1, en_reading] + (st_reading -   seasons_sal2[r - 1, en_reading])/2)]
+  # }
+  # 
+  # seasons_temp2[!is.na(transitions), tdates := tempsal3[param == "temp" & ma_sta == i & reading %in% round(transitions), unique(SampleDate)], by = st_reading]
+  # for(b in which(is.na(seasons_temp2$st_reading) | is.na(seasons_temp2$en_reading))){
+  #   seasons_temp2[b, tdates := seasons_temp2[b, st_SampDate]]
+  # }
+  #   
+  # seasons_sal2[!is.na(transitions), tdates := tempsal3[param == "sal" & ma_sta == i & reading %in% round(transitions), unique(SampleDate)]]
+  # for(b in which(is.na(seasons_sal2$st_reading) | is.na(seasons_sal2$en_reading))){
+  #   seasons_sal2[b, tdates := ifelse(is.na(seasons_sal2[b, st_reading]), 
+  #                                     seasons_sal2[b, st_SampDate], seasons_sal2[b, en_SampDate])]
+  # }
+  
+  for(r in seq(1:nrow(seasons_temp2))){
+    seasons_temp2[r, `:=` (xmin = tempsal3[param == "temp" & ma_sta == i & SampleDate == st_SampDate, unique(date_ind)], #ifelse(r == 1, st_SampDate, tdates), 
+                           xmax = tempsal3[param == "temp" & ma_sta == i & SampleDate == en_SampDate, unique(date_ind)], #ifelse(r == nrow(seasons_temp2), en_SampDate, seasons_temp2[r + 1, tdates]),
+                           ymin = floor(min(tempsal3[param == "temp" & ma_sta == i & !is.na(ResultValue), ResultValue])) - 0.5,
+                           ymax = ceiling(max(tempsal3[param == "temp" & ma_sta == i & !is.na(ResultValue), ResultValue])) + 0.5,
+                           viewymin = floor(min(tempsal3[param == "temp" & ma_sta == i & !is.na(ResultValue), ResultValue])),
+                           viewymax = ceiling(max(tempsal3[param == "temp" & ma_sta == i & !is.na(ResultValue), ResultValue])))]
+  }
+  
+  for(r in seq(1:nrow(seasons_sal2))){
+    seasons_sal2[r, `:=` (xmin = tempsal3[param == "sal" & ma_sta == i & SampleDate == st_SampDate, unique(date_ind)], #ifelse(r == 1, st_SampDate, tdates), 
+                          xmax = tempsal3[param == "sal" & ma_sta == i & SampleDate == en_SampDate, unique(date_ind)], #ifelse(r == nrow(seasons_sal2), en_SampDate, seasons_sal2[r + 1, tdates]),
+                          ymin = floor(min(tempsal3[param == "sal" & ma_sta == i & !is.na(ResultValue), ResultValue])) - 0.5,
+                          ymax = ceiling(max(tempsal3[param == "sal" & ma_sta == i & !is.na(ResultValue), ResultValue])) + 0.5,
+                          viewymin = floor(min(tempsal3[param == "sal" & ma_sta == i & !is.na(ResultValue), ResultValue])),
+                          viewymax = ceiling(max(tempsal3[param == "sal" & ma_sta == i & !is.na(ResultValue), ResultValue])))]
+  }
+  
+  seasons_tempsal2_i <- rbind(seasons_temp2, seasons_sal2)
+  seasons_tempsal2 <- rbind(seasons_tempsal2, seasons_tempsal2_i)
+}
+
+seasons_tempsal2[, param := ifelse(season %in% c("Winter", "Spring", "Summer", "Fall"), "temp", "sal")]
+
+seasons_tempsal2[, `:=` (ma = str_sub(ma_sta, 1, str_locate(ma_sta, ", ")[1] - 1), sta = str_sub(ma_sta, str_locate(ma_sta, ", ")[2] + 1, -1)), by = ma_sta]
+
+plots3 <- seasons_tempsal2 %>%
+  group_nest(ma_sta) %>% 
+  deframe() %>% 
+  map(., ~ {
+    setDT(.x)
+    
+    # temp_seaplot <- ggplot(data = .x[param == "temp", ]) +
+    #   geom_rect(aes(xmin = xmin, xmax = xmax, ymin = ymin, ymax = ymax, fill = season), alpha = 0.5, color = "grey20") +
+    #   geom_line(data = .x[param == "temp" & !is.na(rate), ], aes(x = SampleDate, y = y), lwd = 0.75) +
+    #   coord_cartesian(ylim = c(unique(.x[param == "temp", viewymin]), unique(.x[param == "temp", viewymax]))) +
+    #   theme_bw() +
+    #   scale_fill_manual(values = c("Winter" = "lightblue", "Spring" = "palegreen", "Summer" = "tomato", "Fall" = "lightgoldenrod")) +
+    #   scale_x_date(limits = c(range(as_datetime(.x$SampleDate))[1], range(as_datetime(.x$SampleDate))[2])) +
+    #   labs(y = "Temperature (deg. C)", x = "Sample date") +
+    #   theme(legend.title = element_blank(),
+    #         panel.grid.minor.x = element_blank(),
+    #         axis.text.x = element_text(angle = -45, hjust = 0))
+    
+    plottouse <- which(names(plots1) == paste0(unique(.x$ma), ", ", unique(.x$sta)))
+    # print(unique(.x$ma))
+    # print(unique(.x$sta))
+    # print(paste0(unique(.x$ma), ", ", unique(.x$sta)))
+    # print(plottouse)
+    plot1 <- plots1[[plottouse]]
+    
+    temp_seaplot <- plot1[[1]] + 
+      geom_rect(data = .x[param == "temp", ], aes(xmin = xmin, xmax = xmax, ymin = ymin, ymax = ymax, fill = season), alpha = 0.5, color = "grey20", inherit.aes = FALSE) +
+      coord_cartesian(ylim = c(unique(.x[param == "temp", viewymin]), unique(.x[param == "temp", viewymax]))) +
+      scale_fill_manual(values = subset(seacols, names(seacols) %in% unique(.x$season))) +
+      theme_bw() +
+      # scale_fill_manual(values = c("Winter" = "lightblue", "Spring" = "palegreen", "Summer" = "tomato", "Fall" = "lightgoldenrod")) +
+      # scale_x_date(limits = c(range(as_datetime(.x$SampleDate))[1], range(as_datetime(.x$SampleDate))[2])) +
+      labs(y = "Temperature (deg. C)", x = "Sample date") +
+      theme(legend.title = element_blank(),
+            legend.key = element_rect(fill = "grey70"),
+            panel.grid.minor.x = element_blank(),
+            axis.text.x = element_text(angle = -45, hjust = 0))
+    
+    # sal_seaplot <- ggplot(data = .x[param == "sal", ]) +
+    #   geom_rect(aes(xmin = xmin, xmax = xmax, ymin = ymin, ymax = ymax, fill = season), alpha = 0.5, color = "grey20") +
+    #   geom_line(data = .x[param == "sal" & !is.na(rate), ], aes(x = SampleDate, y = y), lwd = 0.75) +
+    #   coord_cartesian(ylim = c(unique(.x[param == "sal", viewymin]), unique(.x[param == "sal", viewymax]))) +
+    #   theme_bw() +
+    #   scale_fill_manual(values = c("Dry" = "lightblue", "Wetter" = "palegreen", "Wet" = "tomato", "Drier" = "lightgoldenrod")) +
+    #   scale_x_date(limits = c(range(as_datetime(.x$SampleDate))[1], range(as_datetime(.x$SampleDate))[2])) +
+    #   labs(y = "Salinity (ppt)", x = "Sample date") +
+    #   theme(legend.title = element_blank(),
+    #         panel.grid.minor.x = element_blank(),
+    #         axis.text.x = element_text(angle = -45, hjust = 0))
+    
+    sal_seaplot <- plot1[[2]] + 
+      geom_rect(data = .x[param == "sal", ], aes(xmin = xmin, xmax = xmax, ymin = ymin, ymax = ymax, fill = season), alpha = 0.5, color = "grey20", inherit.aes = FALSE) +
+      coord_cartesian(ylim = c(unique(.x[param == "sal", viewymin]), unique(.x[param == "sal", viewymax]))) +
+      scale_fill_manual(values = subset(seacols, names(seacols) %in% unique(.x$season))) +
+      theme_bw() +
+      # scale_fill_manual(values = c("Winter" = "lightblue", "Spring" = "palegreen", "Summer" = "tomato", "Fall" = "lightgoldenrod")) +
+      # scale_x_date(limits = c(range(as_datetime(.x$SampleDate))[1], range(as_datetime(.x$SampleDate))[2])) +
+      labs(y = "Salinity (ppt)", x = "Sample date") +
+      theme(legend.title = element_blank(),
+            panel.grid.minor.x = element_blank(),
+            legend.key = element_rect(fill = "grey70"),
+            axis.text.x = element_text(angle = -45, hjust = 0))
+    
+    temp_seaplot / sal_seaplot + plot_layout(guides = "collect") + plot_annotation(tag_levels = c("A", "B")) #, title = paste0(unique(.x$ProgramLocationID), ", ", unique(.x$ManagedAreaName))) 
+})
+
+```
+
+::: column-page
+::: panel-tabset
+```{r SeasonDefPlotsPrint}
+#| error: FALSE
+#| warning: FALSE
+#| message: FALSE
+#| results: asis
+
+#, fig.cap="Time series plots of continuous water quality monitoring data for (A) temperature and (B) salinity, with background shading indicating the season determinations."
+# results: asis
+# warning: FALSE
+# error: FALSE
+# label: fig-2015datSeasonOverlayTemp
+# fig-cap: "Plots from @fig-2015datplots2Temp with color-shaded regions to show the season determinations."
+
+# iwalk(plots3, ~ {
+#   cat('### ', .y, '\n\n')
+#   
+#   print(.x)
+# 
+#   cat('\n\n')
+# })
+
+# for(p3 in seq_along(plots3)){
+#   cat("\n\n## ", names(plots3)[p3], "\n\n")
+#   print(plots3[[p3]])
+# }
+
+for(p3 in unique(tempsal2$ManagedAreaName)){
+  cat("\n\n## ", p3, "\n\n")
+  for(pp3 in plots3[which(str_detect(names(plots3), p3))]){
+   print(pp3)
+   cat("\n\n")
+  }
+}
+
+```
+:::
+:::
+
+## Seasons by Managed Area
+
+```{r SeasonCompPlotsPrep}
+#| error: FALSE
+#| warning: FALSE
+#| message: FALSE
+
+dpm <- c("Jan" = 31, "Feb" = 29, "Mar" = 31, "Apr" = 30, "May" = 31, "Jun" = 30, "Jul" = 31, "Aug" = 31, "Sep" = 30, "Oct" = 31, "Nov" = 30, "Dec" = 31)
+dpm2 <- data.table(mc = character(),
+                   mn = integer(), 
+                   dn = integer(),
+                   dayn = seq(1, 366))
+n <- 1
+for(d in seq_along(dpm)){
+  row1 <- n
+  row2 <- ifelse(n == 1, dpm[d], sum(dpm[1:d]))
+  dpm2[row1:row2, `:=` (mc = rep(names(dpm)[d], dpm[d]),
+                        mn = rep(d, dpm[d]),
+                        dn = seq(1, dpm[d]))]
+  n <- n + dpm[d]
+}
+dpm2[, lab := paste0(mc, " ", dn)]
+dpm2[, dayn_w := c(154:366, 1:153)]
+
+seasons_tempsal2[, `:=` (daynum = day(st_SampDate) + sum(dpm[1:(month(st_SampDate) - 1)]), sta_medx = which(seasons_tempsal2[ma == ma & param == param, unique(sta)] == sta) + 0.25), by = row.names(seasons_tempsal2)]
+seasons_tempsal2[, daynum_w := dpm2[dayn == daynum, dayn_w], by = row.names(seasons_tempsal2)]
+seasons_tempsal2[, `:=` (ma2 = ma, sta2 = sta, sta = factor(sta))]
+
+seasons <- data.table(managedarea = character(),
+                      season = character(),
+                      month = integer(),
+                      day = integer())
+
+seasons_tempsal2[, med_daynum := ifelse(season == "Winter", dpm2[dayn_w == round(median(daynum_w)), unique(dayn)], round(median(daynum))), by = c("param", "sta", "sta_medx", "season")]
+  
+seasons_tempsal2[, med_daynum_ma := ifelse(season == "Winter", dpm2[dayn_w == round(median(daynum_w)), unique(dayn)], round(median(daynum))), by = c("param", "ma", "season")]
+
+seasons_tempsal2[, med_daynum_ma_yr := ifelse(season == "Winter", dpm2[dayn_w == round(median(daynum_w)), unique(dayn)], round(median(daynum))), by = c("param", "ma", "season", "st_Year")]
+
+seasons_tempsal2[, `:=` (med_seamo_ma = dpm2[dayn == med_daynum_ma, unique(lab)], med_seamo_ma_yr = dpm2[dayn == med_daynum_ma_yr, unique(lab)]), by = row.names(seasons_tempsal2)]
+
+seasonsum_temp <- distinct(seasons_tempsal2[param == "temp", .(param, ma, st_Year, season, med_seamo_ma, med_seamo_ma_yr)])
+
+for(man in unique(seasonsum_temp$ma)){
+  for(yr in seasonsum_temp[ma == man, unique(st_Year)]){
+    if(nrow(seasonsum_temp[ma == man & st_Year == yr, ]) == 4){
+      next
+    } else{
+      sst_my <- seasonsum_temp[ma == man & st_Year == yr, ]
+      missing <- setdiff(unique(seasonsum_temp$season), seasonsum_temp[ma == man & st_Year == yr, unique(season)])
+      missingdat <- data.table(param = rep("temp", length(missing)),
+                               ma = rep(man, length(missing)),
+                               st_Year = rep(yr, length(missing)),
+                               season = missing,
+                               med_seamo_ma = seasonsum_temp[ma == man & season %in% missing & !is.na(med_seamo_ma_yr), unique(med_seamo_ma)],
+                               med_seamo_ma_yr = rep(NA, length(missing)))
+      seasonsum_temp <- rbind(seasonsum_temp, missingdat)
+    }
+  }
+}
+
+setorder(seasonsum_temp, ma, st_Year, season)
+
+write.csv(seasonsum_temp, here::here("OEATUSF_Geospatial_TempSeasons.csv"))
+write.csv(seasonsum_temp, here::here(paste0("OEATUSF_Geospatial_TempSeasons_", Sys.Date(), ".csv")))
+
+plots4 <- seasons_tempsal2 %>% 
+  group_nest(ma) %>% 
+  deframe() %>% 
+  map(., ~ {
+    setDT(.x)
+    
+    staVals_temp <- levels(.x[param == "temp", sta])
+    staVals_sal <- levels(.x[param == "sal", sta])
+    .x[, sta := as.integer(sta)]
+    # .x[, med_daynum := ifelse(season == "Winter", dpm2[dayn_w == round(median(daynum_w)), unique(dayn)], round(median(daynum))), by = c("param", "sta", "sta_medx", "season")]
+    # .x[, med_daynum_ma := ifelse(season == "Winter", dpm2[dayn_w == round(median(daynum_w)), unique(dayn)], round(median(daynum))), by = c("param", "season")]
+    # print(staVals_temp)
+    # print(c(min(.x[param == "temp", sta]):max(.x[param == "temp", sta])))
+    # print(staVals_sal)
+    # print(c(min(.x[param == "sal", sta]):max(.x[param == "sal", sta])))
+    
+    temp_seaplot2 <- ggplot() + 
+      geom_point(data = .x[param == "temp", ], aes(x = daynum, y = sta, fill = season, shape = "Annual median", size = "Annual median"), color = "grey40") +
+      geom_point(data = .x[param == "temp", ], aes(x = med_daynum, y = sta + 0.25, fill = season, shape = "Time series median", size = "Time series median"), color = "grey10") +
+      geom_vline(data = .x[param == "temp", ], aes(xintercept = med_daynum_ma, color = season, linetype = "Managed area median"), linewidth = 1) +
+      scale_fill_manual(values = seacols, guide = "none") +
+      scale_color_manual(values = seacols, guide = "none") +
+      scale_shape_manual(values = c("Annual median" = 21, "Time series median" = 25), guide = "none") +
+      scale_size_manual(values = c("Annual median" = 1, "Time series median" = 2), guide = "none") +
+      scale_x_continuous(breaks = dpm2[dn == 1, dayn], labels = dpm2[dn == 1, lab]) +
+      scale_y_continuous(limits = c(min(.x[param == "temp", sta]) - 0.5, max(.x[param == "temp", sta]) + 0.5),
+                         breaks = c(min(.x[param == "temp", sta]):max(.x[param == "temp", sta])), 
+                         labels = staVals_temp[which(staVals_temp %in% .x[param == "temp", unique(sta2)])]) +
+      coord_cartesian(xlim = c(0, 366)) +
+      theme_bw() +
+      guides(shape = guide_legend(override.aes = list(size = c(1, 2))),
+             fill = guide_legend(override.aes = list(shape = c(rep(15, 4)), 
+                                                     size = c(rep(5, 4)), 
+                                                     color = subset(seacols, names(seacols) %in% unique(.x[param == "temp", season]))))) +
+      labs(y = "Station", x = "Season start day", title = "Temperature") +
+      theme(legend.title = element_blank(),
+            legend.key = element_rect(fill = "grey70"),
+            panel.grid.minor.x = element_blank(),
+            axis.text.x = element_text(angle = -45, hjust = 0),
+            legend.margin = margin(t = -0.25, b = -0.25, unit = "cm"))
+    
+    sal_seaplot2 <- ggplot() + 
+      geom_point(data = .x[param == "sal", ], aes(x = daynum, y = sta, fill = season, shape = "Annual median", size = "Annual median"), alpha = 0.5, color = "grey40") +
+      geom_point(data = .x[param == "sal", ], aes(x = med_daynum, y = sta + 0.25, fill = season, shape = "Time series median", size = "Time series median"), alpha = 1, color = "grey10") +
+      geom_vline(data = .x[param == "sal", ], aes(xintercept = med_daynum_ma, color = season), linewidth = 1) +
+      scale_fill_manual(values = seacols, guide = "none") +
+      scale_color_manual(values = seacols, guide = "none") + 
+      scale_shape_manual(values = c("Annual median" = 21, "Time series median" = 25), guide = "none") +
+      scale_size_manual(values = c("Annual median" = 1, "Time series median" = 2), guide = "none") +
+      scale_x_continuous(breaks = dpm2[dn == 1, dayn], labels = dpm2[dn == 1, lab]) +
+      scale_y_continuous(limits = c(min(.x[param == "sal", sta]) - 0.5, max(.x[param == "sal", sta]) + 0.5),
+                         breaks = c(min(.x[param == "sal", sta]):max(.x[param == "sal", sta])), 
+                         labels = staVals_sal[which(staVals_sal %in% .x[param == "sal", unique(sta2)])]) +
+      coord_cartesian(xlim = c(0, 366)) +
+      theme_bw() +
+      guides(fill = guide_legend(override.aes = list(shape = c(rep(15, 4)), 
+                                                     size = c(rep(5, 4)), 
+                                                     color = subset(seacols, names(seacols) %in% unique(.x[param == "sal", season]))))) +
+      labs(y = "Station", x = "Season start day", title = "Salinity") +
+      theme(legend.title = element_blank(),
+            legend.key = element_rect(fill = "grey70"),
+            panel.grid.minor.x = element_blank(),
+            axis.text.x = element_text(angle = -45, hjust = 0),
+            legend.margin = margin(t = -0.25, b = 0, unit = "cm"))
+    
+    temp_seaplot2 / sal_seaplot2 + plot_layout(guides = "collect") + plot_annotation(tag_levels = c("A", "B"), title = unique(.x$ma2)) 
+})
+
+```
+
+::: column-page
+::: panel-tabset
+```{r SeasonCompPlotsPrint}
+#| results: asis
+#| warning: FALSE
+#| error: FALSE
+#| message: FALSE
+
+#, fig.cap="Season comparison between stations. Vertical lines represent the median season start day for the managed area."
+# label: fig-2015datSeasonOverlayTemp
+# fig-cap: "Plots from @fig-2015datplots2Temp with color-shaded regions to show the season determinations."
+
+# iwalk(plots4, ~ {
+#   cat('### ', .y, '\n\n')
+#   
+#   print(.x)
+# 
+#   cat('\n\n')
+# })
+
+# for(p4 in seq_along(plots4)){
+#   cat("\n\n## ", names(plots4)[p4], "\n\n")
+#   print(plots4[[p4]])
+# }
+
+for(p4 in unique(tempsal2$ManagedAreaName)){
+  cat("\n\n## ", p4, "\n\n")
+  for(pp4 in plots4[which(str_detect(names(plots4), p4))]){
+   print(pp4)
+   cat("\n\n")
+  }
+}
+
+```
+:::
+:::
+
+# Spatial coverage
+
+```{r SpatialCoverage}
+#| error: FALSE
+#| warning: FALSE
+#| message: FALSE
+
+if(update_geo_plots){
+  ddat <- fread(here::here("OEAT_Discrete-2022-Sep-14.csv"))
+  # ddat[, SampleDate := as.POSIXct.numeric(SampleDate, origin = "1970-01-01")]
+  # ddat <- ddat[ManagedAreaName %in% unique(seasons_tempsal2$ma)]
+  # ddat[, season := setorder(seasons_tempsal2[ma == ManagedAreaName & str_detect(str_to_lower(ParameterName), param), .(unique(med_daynum_ma), unique(med_daynum_ma) <= dpm2[mn == month(SampleDate) & dn == day(SampleDate), dayn], unique(season))], cols = "V1")$V3[min(which(setorder(seasons_tempsal2[ma == ManagedAreaName & str_detect(str_to_lower(ParameterName), param), .(unique(med_daynum_ma), unique(med_daynum_ma) <= dpm2[mn == month(SampleDate) & dn == day(SampleDate), dayn], unique(season))], cols = "V1")$V2 == FALSE))], by = row.names(ddat)]
+  
+  ddat[, `:=` (mnum = month(SampleDate), dnum = day(SampleDate))]
+  dpm3 <- dpm2
+  setnames(dpm3, c("mn", "dn"), c("mnum", "dnum"))
+  ddat <- merge(ddat, dpm3[, .(mnum, dnum, dayn)])
+  seasons_tempsal3 <- distinct(seasons_tempsal2[param == "temp", .(ma, med_daynum_ma, season)])
+  setorder(seasons_tempsal3, "ma", "med_daynum_ma")
+  
+  seasons_t <- data.table(ma = character(),
+                          dayn = character(),
+                          season = character())
+  for(m in unique(seasons_tempsal3$ma)){
+    seasons_m <- data.table(ma = rep(m, 366),
+                            dayn = c(seq(seasons_tempsal3[ma == m, med_daynum_ma][1], seasons_tempsal3[ma == m, med_daynum_ma][2] - 1),
+                                     seq(seasons_tempsal3[ma == m, med_daynum_ma][2], seasons_tempsal3[ma == m, med_daynum_ma][3] - 1),
+                                     seq(seasons_tempsal3[ma == m, med_daynum_ma][3], seasons_tempsal3[ma == m, med_daynum_ma][4] - 1),
+                                     seq(seasons_tempsal3[ma == m, med_daynum_ma][4], 366),
+                                     seq(1, seasons_tempsal3[ma == m, med_daynum_ma][1] - 1)),
+                            season = c(rep(seasons_tempsal3[ma == m, season][1], seasons_tempsal3[ma == m, med_daynum_ma][2] - seasons_tempsal3[ma == m, med_daynum_ma][1]),
+                                       rep(seasons_tempsal3[ma == m, season][2], seasons_tempsal3[ma == m, med_daynum_ma][3] - seasons_tempsal3[ma == m, med_daynum_ma][2]),
+                                       rep(seasons_tempsal3[ma == m, season][3], seasons_tempsal3[ma == m, med_daynum_ma][4] - seasons_tempsal3[ma == m, med_daynum_ma][3]),
+                                       rep(seasons_tempsal3[ma == m, season][4], 367 - seasons_tempsal3[ma == m, med_daynum_ma][4]),
+                                       rep(seasons_tempsal3[ma == m, season][4], seasons_tempsal3[ma == m, med_daynum_ma][1] - 1)))
+    
+    seasons_t <- rbind(seasons_t, seasons_m)
+  }
+  
+  seasons_t[, dayn := as.integer(dayn)]
+  setnames(seasons_t, c("ma"), c("ManagedAreaName"))
+  ddat <- merge(ddat, seasons_t, by = c("ManagedAreaName", "dayn"), all.x = TRUE)
+  # ddat[, season := seasons_tempsal2[dayn == dayn, season], by = dayn]
+  
+  # test <- data.table(ma = character(),
+  #                    param = character(),
+  #                    V3 = numeric(),
+  #                    V4 = numeric(),
+  #                    V5 = numeric())
+  # for(m in unique(ddat$ManagedAreaName)){
+  #   for(p in unique(ddat$ParameterName)){
+  #     for(d in unique(ddat$SampleDate)){
+  #       test_mp <- setorder(seasons_tempsal2[ma == m & str_detect(str_to_lower(p), param), .(ma, param, unique(med_daynum_ma), unique(med_daynum_ma) <= dpm2[mn == month(as.Date(d, origin = "1970-01-01")) & dn == day(as.Date(d, origin = "1970-01-01")), dayn], unique(season))], cols = "V3")
+  #       test <- rbind(test, test_mp)
+  #     }
+  #   }
+  # }
+  
+  rcp <- st_read(here::here("mapping/orcp_all_sites/orcp_all_sites/ORCP_Managed_Areas.shp"))
+  counties <- st_read(here::here("mapping/FLCounties/Counties_-_Detailed_Shoreline.shp"))
+  corners <- fread(here::here("mapping/MApolygons_corners.csv"))
+  
+  rcp <- st_make_valid(rcp)
+  counties <- st_make_valid(counties)
+  rcp <- st_transform(rcp, crs = 4326)
+  counties <- st_transform(counties, crs = 4326)
+  
+  ddat_g <- st_as_sf(distinct(ddat[!is.na(Latitude_DD) & !is.na(Longitude_DD) & ParameterName %in% c("Dissolved Oxygen", "pH", "Salinity", "Secchi Depth", "Water Temperature", "Turbidity", "Total Phosphorus", "Total Suspended Solids, TSS", "Total Nitrogen") & !is.na(season), .(ManagedAreaName, Month, Year, Longitude_DD, Latitude_DD, ParameterName, season)]), coords = c("Longitude_DD", "Latitude_DD"), crs = 4326)
+  ddat_g$Month <- factor(ddat_g$Month, levels = c(1:12))
+  ddat_g$ParameterName <- ifelse(str_detect(ddat_g$ParameterName, "TSS"), "Total Suspended Solids", ddat_g$ParameterName)
+  
+  # i <- "Biscayne Bay Aquatic Preserve"
+  # p <- "Secchi Depth"
+  # mcols <- sequential_hcl(12, palette = "Inferno")
+  # mcols <- c(mcols, "transparent")
+  # names(mcols) <- c(as.character(seq(1:12)), "no data")
+  mcols <- sequential_hcl(4, palette = "Inferno")
+  mcols <- c(mcols, "transparent")
+  names(mcols) <- c("Winter", "Spring", "Summer", "Fall", "no data")
+  
+  for(i in unique(ddat_g$ManagedAreaName)){
+    ddat_gi <- subset(ddat_g, ddat_g$ManagedAreaName == i)
+    
+    for(p in unique(ddat_gi$ParameterName)){
+      plotdat <- subset(ddat_gi, ddat_gi$ManagedAreaName == i & ddat_gi$ParameterName == p)
+      missingyrs <- sort(setdiff(c(min(plotdat$Year):max(plotdat$Year)), unique(plotdat$Year)))
+      if(length(missingyrs) > 0){
+        mys <- st_as_sf(data.table(ManagedAreaName = i,
+                                   Month = "no data",
+                                   season = "no data",
+                                   Year = missingyrs,
+                                   ParameterName = p,
+                                   geometry = plotdat$geometry[1]))
+        
+        plotdat <- rbind(plotdat, mys)
+      }
+      
+      plotdat$lab_nd <- ifelse(plotdat$season == "no data", "No Data", "")
+      
+      xmin <- st_bbox(subset(ddat_gi, ddat_gi$ManagedAreaName == i & ddat_gi$ParameterName == p)$geometry)[names(st_bbox(subset(ddat_gi, ddat_gi$ManagedAreaName == i & ddat_gi$ParameterName == p)$geometry)) %in% c("xmin", "xmax")][[1]]
+      xmax <- st_bbox(subset(ddat_gi, ddat_gi$ManagedAreaName == i & ddat_gi$ParameterName == p)$geometry)[names(st_bbox(subset(ddat_gi, ddat_gi$ManagedAreaName == i & ddat_gi$ParameterName == p)$geometry)) %in% c("xmin", "xmax")][[2]]
+      xbrk <- c(plyr::round_any(xmin, 0.01, f = ceiling), plyr::round_any(xmin + (xmax - xmin)/2, 0.01, f = round), plyr::round_any(xmax, 0.01, f = floor))
+          
+      ymin <- st_bbox(subset(ddat_gi, ddat_gi$ManagedAreaName == i & ddat_gi$ParameterName == p)$geometry)[names(st_bbox(subset(ddat_gi, ddat_gi$ManagedAreaName == i & ddat_gi$ParameterName == p)$geometry)) %in% c("ymin", "ymax")][[1]]
+      ymax <- st_bbox(subset(ddat_gi, ddat_gi$ManagedAreaName == i & ddat_gi$ParameterName == p)$geometry)[names(st_bbox(subset(ddat_gi, ddat_gi$ManagedAreaName == i & ddat_gi$ParameterName == p)$geometry)) %in% c("ymin", "ymax")][[2]]
+      ybrk <- c(plyr::round_any(ymin, 0.01, f = ceiling), plyr::round_any(ymin + (ymax - ymin)/2, 0.01, f = round), plyr::round_any(ymax, 0.01, f = floor))
+      
+      lab_x <- xmax - ((xmax - xmin)/2) - ((xmax - xmin) * 0.05)
+      lab_y <- ymax - (ymax - ymin) * 0.005
+      
+      i_p <- ggplot(data = plotdat) +
+        geom_sf(data = subset(rcp, rcp$LONG_NAME == i)) +
+        geom_sf(aes(color = season, size = season)) +
+        geom_text(data = plotdat, aes(label = lab_nd), 
+                 x = lab_x, y = ymax, size = 8/.pt, hjust = "center", vjust = "bottom", fontface = "bold") +
+        # scale_size_manual(values = c(3.75, 3.5, 3.25, 3, 2.75, 2.5, 2.25, 2, 1.75, 1.5, 1.25, 1), labels = c("1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12")) +
+        # scale_size_manual(values = c(3.75, 3.5, 3.25, 3, 2.75, 2.5, 2.25, 2, 1.75, 1.5, 1.25, 1, 0.01), labels = c("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec", "")) +
+        scale_size_manual(values = c(3.5, 2.5, 1.5, 0.5, 0.01), labels = c("Winter", "Spring", "Summer", "Fall", "")) +
+        scale_x_continuous(breaks = xbrk) +
+        scale_y_continuous(breaks = ybrk) +
+        scale_color_manual(values = seacols) + #, labels = c("Winter", "Spring", "Summer", "Fall", "")
+        theme_classic(base_size = 9) +
+        labs(title = i, subtitle = paste0("Discrete, ", p)) +
+        facet_wrap(~Year, ncol = 10) +
+        theme(plot.margin = margin(10, 10, 10, 10),
+              legend.key = element_rect(fill = "grey70"),
+              plot.background = element_rect(color = "grey99"),
+              axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5))
+      
+      saveRDS(i_p, here::here(paste0("plots/Discrete_", str_replace_all(i, " ", ""), "_", str_replace_all(p, " ", ""), "_season.rds")))
+      
+      ggsave(here::here(paste0("plots/Discrete_", str_replace_all(i, " ", ""), "_", str_replace_all(p, " ", ""), "_season.pdf")),
+             i_p,
+             height = ceiling(length(unique(plotdat$Year))/10) * 3,
+             width = ifelse(length(unique(plotdat$Year)) < 10, (length(unique(plotdat$Year)) * 3) + 6, 36),
+             dpi = 300)
+      
+      # ggsave(here::here(paste0("plots/Discrete_", str_replace_all(i, " ", ""), "_", str_replace_all(p, " ", ""), ".png")),
+      #        i_p,
+      #        height = ceiling(length(unique(plotdat$Year))/10) * 3,
+      #        width = ifelse(length(unique(plotdat$Year)) < 10, (length(unique(plotdat$Year)) * 3) + 6, 36),
+      #        dpi = 300)
+      
+      #Crop extra white space
+      knitr::plot_crop(here::here(paste0("plots/Discrete_", str_replace_all(i, " ", ""), "_", str_replace_all(p, " ", ""), "_season.pdf")))
+      
+      #render bitmap
+      bitmap <- pdftools::pdf_render_page(here::here(paste0("plots/Discrete_", str_replace_all(i, " ", ""), "_", str_replace_all(p, " ", ""), "_season.pdf")), dpi = 600)
+      
+      #create .png version
+      png::writePNG(bitmap, here::here(paste0("plots/Discrete_", str_replace_all(i, " ", ""), "_", str_replace_all(p, " ", ""), "_season.png")))
+      
+      
+      #print(paste0("Done with ", p, " plot for ", i, "!"))
+    }
+  }
+}
+
+# Code from SAV script for vertically arranged multi-year maps
+
+# #add 20% of difference (xmax-xmin) to xmax to help prevent year labels from getting cut off map images and 10% to ymax
+# corners[, `:=` (xmax = xmax + (xmax-xmin)*0.25, ymax = ymax + (ymax-ymin)*0.1)]
+# 
+# locs_pts <- st_make_valid(locs_pts)
+# locs_lns <- st_make_valid(locs_lns)
+# rcp <- st_make_valid(rcp)
+# counties <- st_make_valid(counties)
+# 
+# locs_pts <- st_transform(locs_pts, crs = 4326)
+# locs_lns <- st_transform(locs_lns, crs = 4326)
+# rcp <- st_transform(rcp, crs = 4326)
+# counties <- st_transform(counties, crs = 4326)
+# 
+# locs_pts_rcp <- locs_pts[rcp, , op = st_intersects]
+# locs_lns_rcp <- locs_lns[rcp, , op = st_intersects]
+
+# fl_i <- st_crop(counties, xmin = corners[ManagedAreaName == i, xmin], xmax = corners[ManagedAreaName == i, xmax], ymin = corners[ManagedAreaName == i, ymin], ymax = corners[ManagedAreaName == i, ymax])
+#       rcp_i <- subset(rcp, rcp$LONG_NAME == ifelse(stringr::str_detect(i, "NERR"), paste0(str_sub(i, 1, -6), " National Estuarine Research Reserve"), 
+#                                                    ifelse(stringr::str_detect(i, "NMS"), paste0(str_sub(i, 1, -5), " National Marine Sanctuary"), 
+#                                                           ifelse(str_detect(i, "Fort Clinch|Fort Pickens|Rocky Bayou|St. Andrews"), paste0(i, " State Park Aquatic Preserve"), paste0(i, " Aquatic Preserve")))))
+#       
+#       locs_pts_rcp_i <- locs_pts_rcp[rcp_i, , op = st_intersects]
+#       locs_lns_rcp_i <- locs_lns_rcp[rcp_i, , op = st_intersects]
+#       
+#       yadd <- 0
+#       startyear <- min(SAV4[ManagedAreaName == i & !is.na(eval(p)), Year])
+#       base <- ggplot() +
+#         geom_sf(data = rotate_sf(fl_i, coast = corners[ManagedAreaName == i, Coast[1]]), fill = "beige", color = "navajowhite3", inherit.aes = FALSE) +
+#         geom_sf(data = rotate_sf(rcp_i, coast = corners[ManagedAreaName == i, Coast[1]]), color = "grey50", fill = "mediumaquamarine", alpha = 0.4, lwd = 1, inherit.aes = FALSE) +
+#         #scale_fill_brewer(palette = "Dark2") +
+#         scale_color_manual(values = subset(prcols, names(prcols) %in% unique(SAV4[ManagedAreaName == i & !is.na(eval(p)), ProgramID])), 
+#                            aesthetics = c("color", "fill")) +
+#         labs(title = ifelse(stringr::str_detect(i, "NERR"), paste0(str_sub(i, 1, -6), " National Estuarine Research Reserve"), 
+#                             ifelse(stringr::str_detect(i, "NMS"), paste0(str_sub(i, 1, -5), " National Marine Sanctuary"), paste0(i, " Aquatic Preserve"))), 
+#              fill = "Program ID") +
+#         theme(panel.grid.major = element_line(colour = NA),
+#               panel.grid.minor = element_line(colour = NA),
+#               axis.text = element_blank(),
+#               axis.ticks = element_blank(),
+#               axis.title = element_blank(),
+#               panel.background = element_rect(fill = NA),
+#               plot.background = element_rect(colour = NA))
+#       ystart <- ifelse(corners[ManagedAreaName == i, Coast[1]] == "Atlantic", attributes(base$layers[[2]]$data$geometry)$bbox$ymax[[1]], attributes(base$layers[[2]]$data$geometry)$bbox$ymin[[1]])
+#       xlab <- attributes(base$layers[[2]]$data$geometry)$bbox$xmax[[1]] + (attributes(base$layers[[2]]$data$geometry)$bbox$xmax[[1]] - attributes(base$layers[[2]]$data$geometry)$bbox$xmin[[1]])/50
+#       MAcoords <- setDT(as.data.frame(st_coordinates(rcp_i)))
+#       maxdist <- max(st_distance(st_as_sf(MAcoords[X == min(X), ], coords = c("X", "Y"), crs = 4326), st_as_sf(MAcoords[Y == max(Y), ], coords = c("X", "Y"), crs = 4326)),
+#                      st_distance(st_as_sf(MAcoords[X == max(X), ], coords = c("X", "Y"), crs = 4326), st_as_sf(MAcoords[Y == min(Y), ], coords = c("X", "Y"), crs = 4326)),
+#                      st_distance(st_as_sf(MAcoords[X == min(X), ], coords = c("X", "Y"), crs = 4326), st_as_sf(MAcoords[X == max(X), ], coords = c("X", "Y"), crs = 4326)),
+#                      st_distance(st_as_sf(MAcoords[Y == min(Y), ], coords = c("X", "Y"), crs = 4326), st_as_sf(MAcoords[Y == max(Y), ], coords = c("X", "Y"), crs = 4326)))
+#       area <- st_area(rcp_i)
+#       xyratio <- as.numeric((area/maxdist)/maxdist)
+#       
+#       MApolycoords <- setDT(as.data.frame(st_coordinates(base$layers[[2]]$data)))
+#       xmax_y <- MApolycoords[X == max(X), Y]
+#       base <- base + annotate("text", x = xlab, y = xmax_y, label = paste0(startyear), hjust = "left")
+#       
+#       MApolycoords[, Xrnd := round(X, 3)][, ydists := max(Y) - min(Y), by = Xrnd]
+#       maxydist <- max(MApolycoords$ydists) + ((max(MApolycoords$ydists)/25) / xyratio) 
+#       
+#       if(length(subset(locs_pts_rcp_i, locs_pts_rcp_i$LocationID %in% unique(SAV4[ManagedAreaName == i & !is.na(eval(p)) & Year == startyear, LocationID]))$LocationID) > 0){
+#         base <- base +
+#           geom_sf(data = rotate_sf(subset(locs_pts_rcp_i, locs_pts_rcp_i$LocationID %in% unique(SAV4[ManagedAreaName == i & !is.na(eval(p)) & Year == startyear, LocationID])),
+#                                    coast = corners[ManagedAreaName == i, Coast[1]]),
+#                   aes(fill = droplevels(as.factor(ProgramID))), shape = 21, color = "black")
+#       }
+#       
+#       if(length(subset(locs_lns_rcp_i, locs_lns_rcp_i$LocationID %in% unique(SAV4[ManagedAreaName == i & !is.na(eval(p)) & Year == startyear, LocationID]))$LocationID) > 0){
+#         base <- base +
+#           geom_sf(data = rotate_sf(subset(locs_lns_rcp_i, locs_lns_rcp_i$LocationID %in% unique(SAV4[ManagedAreaName == i & !is.na(eval(p)) & Year == startyear, LocationID])),
+#                                    coast = corners[ManagedAreaName == i, Coast[1]]),
+#                   aes(color = droplevels(as.factor(ProgramID))), shape = 21)
+#       }
+#       
+#       for(y in sort(unique(SAV4[ManagedAreaName == i & !is.na(eval(p)) & Year != startyear, Year]))){
+#         base <- base +
+#           geom_sf(data = rotate_sf(rcp_i, y_add = yadd + maxydist, coast = corners[ManagedAreaName == i, Coast[1]]), 
+#                   color = "grey50", fill = "mediumaquamarine", alpha = 0.85, lwd = 1, inherit.aes = FALSE) +
+#           annotate("text", x = xlab, y = xmax_y + yadd + maxydist, label = y, hjust = "left")
+#         
+#         if(length(subset(locs_pts_rcp_i, locs_pts_rcp_i$LocationID %in% unique(SAV4[ManagedAreaName == i & !is.na(eval(p)) & Year == y, LocationID]))$LocationID) > 0){
+#           base <- base +
+#             geom_sf(data = rotate_sf(subset(locs_pts_rcp_i, locs_pts_rcp_i$LocationID %in% unique(SAV4[ManagedAreaName == i & !is.na(eval(p)) & Year == y, LocationID])),
+#                                      y_add = yadd + maxydist, coast = corners[ManagedAreaName == i, Coast[1]]), 
+#                     aes(fill = droplevels(as.factor(ProgramID))), shape = 21, color = "black")
+#         }
+#         
+#         if(length(subset(locs_lns_rcp_i, locs_lns_rcp_i$LocationID %in% unique(SAV4[ManagedAreaName == i & !is.na(eval(p)) & Year == startyear, LocationID]))$LocationID) > 0){
+#           base <- base +
+#             geom_sf(data = rotate_sf(subset(locs_lns_rcp_i, locs_lns_rcp_i$LocationID %in% unique(SAV4[ManagedAreaName == i & !is.na(eval(p)) & Year == startyear, LocationID])),
+#                                      y_add = yadd + maxydist, coast = corners[ManagedAreaName == i, Coast[1]]),
+#                     aes(color = droplevels(as.factor(ProgramID))), shape = 21)
+#         }
+#         
+#         yadd <- yadd + maxydist
+#         startyear <- startyear + 1
+#         ystart <- ystart + maxydist
+#       }        
+#       
+#       saveRDS(base, here::here(paste0("SAV/output/Figures/BB/SAV_", parameters[column == p, type], "_", 
+#                                       gsub('\\b(\\pL)\\pL{2,}|.','\\U\\1', i, perl = TRUE),
+#                                       ifelse(stringr::str_detect(i, "NERR"), "ERR_map_bypr.rds", 
+#                                              ifelse(stringr::str_detect(i, "NMS"), "MS_map_bypr.rds", "AP_map_bypr.rds")))))
+#       
+#       #Save image file versions of the maps
+#       # nlayers <- 0
+#       # for(k in seq_along(base$layers)){
+#       #   class_k <- class(base$layers[[k]])[2]
+#       #   if(class_k == 'Layer'){
+#       #     nlayers <- nlayers + 1
+#       #   } else{
+#       #     next
+#       #   }
+#       # }
+#       
+#       base <- base +
+#         theme(legend.position='right', 
+#               legend.justification='top',
+#               legend.direction='vertical')
+#       
+#       ggsave(filename = here::here(paste0("SAV/output/Figures/BB/img/SAV_", parameters[column == p, type], "_", 
+#                                           gsub('\\b(\\pL)\\pL{2,}|.','\\U\\1', i, perl = TRUE),
+#                                           ifelse(stringr::str_detect(i, "NERR"), "ERR_map_bypr.jpg", 
+#                                                  ifelse(stringr::str_detect(i, "NMS"), "MS_map_bypr.jpg", "AP_map_bypr.jpg")))), 
+#              plot = base,
+#              width = 6,
+#              #height = 8 + nlayers - 5,
+#              height = yadd/maxydist,
+#              limitsize = FALSE)
+
+```
+
+```{r GeoPlotsSetup}
+#| error: FALSE
+#| warning: FALSE
+#| message: FALSE
+
+#, message=FALSE, warning=FALSE, fig.height = 11, out.width = "100%"
+generateMaps <- function(ManagedAreaName){
+  imgfiles <- list.files(here::here("plots/"), full.names = TRUE) #get file list
+  
+  if(ManagedAreaName == "Guana River Marsh Aquatic Preserve"){
+    plots <- imgfiles[which(str_detect(imgfiles, paste0("plots/Discrete_", str_replace_all("Guana Tolomato Matanzas National Estuarine Research Reserve", " ", ""), "_")) & str_detect(imgfiles, "_season.png"))]
+  } else{
+    plots <- imgfiles[which(str_detect(imgfiles, paste0("plots/Discrete_", str_replace_all(ManagedAreaName, " ", ""), "_")) & str_detect(imgfiles, "_season.png"))]
+  }
+  
+  
+  # plots <- lapply(pl, function(x){paste0(here::here(paste0("Figures/BB/img/", str_subset(x, ".jpg"))))})
+  
+  return(unlist(plots))
+}
+
+geoplots <<- lapply(unique(seasons_tempsal2$ma), function(x) generateMaps(x))
+names(geoplots) <- unique(seasons_tempsal2$ma)
+
+for(gp in seq_along(geoplots)){
+  
+  parsub <- str_locate_all(geoplots[[gp]], "_")
+  parsub_st <- unlist(lapply(parsub, function(x) x[3, 1] + 1))
+  parsub_en <- unlist(lapply(parsub, function(x) x[4, 1] - 1))
+  
+  gp_pars <- str_sub(geoplots[[gp]], parsub_st, parsub_en)
+  gp_pars <- gsub("([[:lower:]])([[:upper:]][[:lower:]])", "\\1 \\2", gp_pars)
+  names(geoplots[[gp]]) <- gp_pars
+}
+
+```
+
+## Discrete water quality
+
+::: column-page
+::: panel-tabset
+```{r GeoPlotsPrint}
+#| error: FALSE
+#| warning: FALSE
+#| message: FALSE
+#| results: asis
+
+#, fig.cap="Discrete water quality sampling locations with data available from each season defined in the previous section."
+#, results='asis'
+# results: asis
+# warning: FALSE
+# error: FALSE
+# label: fig-2015datSeasonOverlayTemp
+# fig-cap: "Plots from @fig-2015datplots2Temp with color-shaded regions to show the season determinations."
+# iwalk(geoplots, ~ {
+#   print(.x)
+#   
+#   cat('## ', .y, '\n\n::: panel-tabset\n\n')
+#   
+#   # geoplots_y <- geoplots[which(names(geoplots) == .y)]
+#   
+#   iwalk(.x, ~ {
+#     cat('## ', .y, '\n\n')
+#     
+#     print(.x)
+#     
+#     knitr::include_graphics(.x)
+#     
+#     cat('\n\n')
+#   })
+#   
+#   cat(':::\n\n')
+# })
+
+for(gp in seq_along(geoplots)){
+  cat("\n\n## ", names(geoplots)[gp], 
+      "\n\n::: {.panel-tabset}\n\n")
+  for(gp_sub in seq_along(geoplots[[gp]])){
+    cat("\n\n## ", names(geoplots[[gp]])[gp_sub], "\n\n",
+        "![", names(geoplots[[gp]])[gp_sub], "](https://github.com/FloridaSEACAR/WQ_Summaries/blob/gh-pages/plots/", str_sub(geoplots[[gp]][gp_sub], str_locate_all(geoplots[[1]][1], "/")[[1]][length(str_locate_all(geoplots[[1]][1], "/")[[1]])] + 1, -1), ")\n\n", sep = "")
+  }
+  cat("\n\n:::")
+}
+
+```
+:::
+:::
