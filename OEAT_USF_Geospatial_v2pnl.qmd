@@ -54,7 +54,7 @@ library(visreg)
 library(scattermore)
 
 #Should the geoplots be updated?
-update_geo_plots <- FALSE
+update_geo_plots <- TRUE
 
 ```
 
@@ -1239,14 +1239,16 @@ if(update_geo_plots){
         geom_sf(data = subset(rcp, rcp$LONG_NAME == i)) +
         geom_sf(aes(color = season, size = season)) +
         geom_text(data = plotdat, aes(label = lab_nd), 
-                 x = lab_x, y = ymax, size = 8/.pt, hjust = "center", vjust = "bottom", fontface = "bold") +
+                 x = lab_x, y = ymax, size = 7/.pt, hjust = "center", vjust = "bottom", fontface = "bold") +
         # scale_size_manual(values = c(3.75, 3.5, 3.25, 3, 2.75, 2.5, 2.25, 2, 1.75, 1.5, 1.25, 1), labels = c("1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12")) +
         # scale_size_manual(values = c(3.75, 3.5, 3.25, 3, 2.75, 2.5, 2.25, 2, 1.75, 1.5, 1.25, 1, 0.01), labels = c("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec", "")) +
-        scale_size_manual(values = c(3.5, 2.5, 1.5, 0.5, 0.01), labels = c("Winter", "Spring", "Summer", "Fall", "")) +
+        # scale_size_manual(values = c(3.5, 2.5, 1.5, 0.5, 0.01), labels = c("Winter", "Spring", "Summer", "Fall", "")) +
+        # scale_size_manual(values = c(1.65, 1.15, 0.65, 0.15, 0.001), labels = c("Winter", "Spring", "Summer", "Fall", "")) +
+        scale_size_manual(values = c(1, 0.65, 0.35, 0.1, 0.001), labels = c("Winter", "Spring", "Summer", "Fall", "")) +
         scale_x_continuous(breaks = xbrk) +
         scale_y_continuous(breaks = ybrk) +
         scale_color_manual(values = seacols) + #, labels = c("Winter", "Spring", "Summer", "Fall", "")
-        theme_classic(base_size = 9) +
+        theme_classic(base_size = 7) +
         labs(title = i, subtitle = paste0("Discrete, ", p)) +
         facet_wrap(~Year, ncol = 10) +
         theme(plot.margin = margin(10, 10, 10, 10),
@@ -1260,7 +1262,8 @@ if(update_geo_plots){
              i_p,
              height = ceiling(length(unique(plotdat$Year))/10) * 3,
              width = ifelse(length(unique(plotdat$Year)) < 10, (length(unique(plotdat$Year)) * 3) + 6, 36),
-             dpi = 300)
+             units = "cm") #,
+             #dpi = 90)
       
       # ggsave(here::here(paste0("plots/Discrete_", str_replace_all(i, " ", ""), "_", str_replace_all(p, " ", ""), ".png")),
       #        i_p,
@@ -1272,7 +1275,7 @@ if(update_geo_plots){
       knitr::plot_crop(here::here(paste0("plots/Discrete_", str_replace_all(i, " ", ""), "_", str_replace_all(p, " ", ""), "_season.pdf")))
       
       #render bitmap
-      bitmap <- pdftools::pdf_render_page(here::here(paste0("plots/Discrete_", str_replace_all(i, " ", ""), "_", str_replace_all(p, " ", ""), "_season.pdf")), dpi = 600)
+      bitmap <- pdftools::pdf_render_page(here::here(paste0("plots/Discrete_", str_replace_all(i, " ", ""), "_", str_replace_all(p, " ", ""), "_season.pdf")), dpi = 150)
       
       #create .png version
       png::writePNG(bitmap, here::here(paste0("plots/Discrete_", str_replace_all(i, " ", ""), "_", str_replace_all(p, " ", ""), "_season.png")))
