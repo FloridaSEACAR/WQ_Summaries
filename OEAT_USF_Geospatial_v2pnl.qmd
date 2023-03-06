@@ -1494,8 +1494,10 @@ for(gp in seq_along(geoplots)){
   cat("\n\n## ", names(geoplots)[gp], 
       "\n\n::: {.panel-tabset}\n\n")
   for(gp_sub in seq_along(geoplots[[gp]])){
+    # cat("\n\n## ", names(geoplots[[gp]])[gp_sub], "\n\n",
+    #     "![", names(geoplots[[gp]])[gp_sub], "](https://github.com/FloridaSEACAR/WQ_Summaries/blob/gh-pages/plots/", str_sub(geoplots[[gp]][gp_sub], str_locate_all(geoplots[[1]][1], "/")[[1]][length(str_locate_all(geoplots[[1]][1], "/")[[1]])] + 1, -1), ")\n\n", sep = "")
     cat("\n\n## ", names(geoplots[[gp]])[gp_sub], "\n\n",
-        "![", names(geoplots[[gp]])[gp_sub], "](https://github.com/FloridaSEACAR/WQ_Summaries/blob/gh-pages/plots/", str_sub(geoplots[[gp]][gp_sub], str_locate_all(geoplots[[1]][1], "/")[[1]][length(str_locate_all(geoplots[[1]][1], "/")[[1]])] + 1, -1), ")\n\n", sep = "")
+        "![", names(geoplots[[gp]])[gp_sub], "](", geoplots[[gp]][gp_sub], ")\n\n", sep = "")
   }
   cat("\n\n:::")
 }
